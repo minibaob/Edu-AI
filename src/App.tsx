@@ -1,4 +1,5 @@
 import { Layout } from "@/src/components/layout";
+import { AuthProvider } from "@/src/lib/auth";
 import { useRoute } from "@/src/lib/router";
 import HomePage from "@/src/pages/home";
 import ResourcesPage from "@/src/pages/resources";
@@ -32,5 +33,9 @@ export default function App() {
       page = <HomePage />;
   }
 
-  return <Layout>{page}</Layout>;
+  return (
+    <AuthProvider>
+      <Layout>{page}</Layout>
+    </AuthProvider>
+  );
 }

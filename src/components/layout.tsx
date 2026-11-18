@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
-import { BookOpen, Building2, Compass, GraduationCap, Home, User } from "lucide-react";
-import { Link, useRoute } from "@/src/lib/router";
+import { BookOpen, Building2, Compass, GraduationCap, Home, LogOut, User } from "lucide-react";
+import { Link, navigate, useRoute } from "@/src/lib/router";
+import { useAuth } from "@/src/lib/auth";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
@@ -12,6 +13,17 @@ const NAV_ITEMS = [
 
 export function Layout({ children }: { children: ReactNode }) {
   const route = useRoute();
+  const { user, logout } = useAuth();
+
+  async function handleLogout() {
+    try {
+      await logout();
+      navigate("/");
+    } catch {
+      // 退出失败时保留登录状态，用户可重试。
+    }
+  }
+
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="sticky top-0 z-40 border-b border-border bg-card/90 backdrop-blur">
@@ -51,14 +63,27 @@ export function Layout({ children }: { children: ReactNode }) {
               )}
             >
               <User className="size-4" aria-hidden />
-              <span className="hidden sm:inline">个人中心</span>
+              <span className="hidden max-w-28 truncate sm:inline">
+                {user ? user.display_name || user.username : "个人中心"}
+              </span>
             </Link>
-            <Link
-              to="/login"
-              className="edu-gradient rounded-lg px-4 py-2 text-sm font-medium text-white hover:opacity-90"
-            >
-              登录 / 注册
-            </Link>
+            {user ? (
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <LogOut className="size-4" aria-hidden />
+                <span className="hidden sm:inline">退出</span>
+              </button>
+            ) : (
+              <Link
+                to="/login"
+                className="edu-gradient rounded-lg px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+              >
+                登录 / 注册
+              </Link>
+            )}
           </div>
         </div>
         <nav

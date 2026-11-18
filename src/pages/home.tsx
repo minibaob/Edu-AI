@@ -15,6 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DemoBadge } from "@/src/components/demo-badge";
 import { Link } from "@/src/lib/router";
+import { useAuth } from "@/src/lib/auth";
 import {
   DEMO_RECOMMENDATIONS,
   DEMO_STATS,
@@ -39,6 +40,7 @@ const QUICK_ENTRIES = [
 ];
 
 export default function HomePage() {
+  const { user } = useAuth();
   const [tasks, setTasks] = useState(DEMO_TASKS);
   const doneCount = tasks.filter((t) => t.done).length;
 
@@ -46,7 +48,9 @@ export default function HomePage() {
     <div className="flex flex-col gap-6">
       <section className="edu-gradient relative overflow-hidden rounded-2xl px-6 py-10 text-white sm:px-10">
         <div className="relative z-10 flex max-w-2xl flex-col gap-4">
-          <p className="text-sm font-medium text-white/85">{greeting()}，同学</p>
+          <p className="text-sm font-medium text-white/85">
+            {greeting()}，{user ? user.display_name || user.username : "同学"}
+          </p>
           <h1 className="text-3xl font-bold leading-snug sm:text-4xl">
             让学习更智能，让成长有方向
           </h1>
@@ -55,9 +59,15 @@ export default function HomePage() {
             帮助你发现潜力、降低教育信息差。
           </p>
           <div className="flex flex-wrap gap-3 pt-1">
-            <Button asChild className="bg-white text-primary hover:bg-white/90">
-              <Link to="/login">登录 / 注册</Link>
-            </Button>
+            {user ? (
+              <Button asChild className="bg-white text-primary hover:bg-white/90">
+                <Link to="/profile">进入个人中心</Link>
+              </Button>
+            ) : (
+              <Button asChild className="bg-white text-primary hover:bg-white/90">
+                <Link to="/login">登录 / 注册</Link>
+              </Button>
+            )}
             <Button
               asChild
               variant="outline"
