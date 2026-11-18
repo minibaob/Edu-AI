@@ -2,7 +2,7 @@
 // 应用身份只来自本应用自己的会话校验；绝不使用 ctx.user 或任何平台身份回退。
 
 // 站点固定公开来源（非密钥的站点常量）。校验时不读取请求的 Host / Forwarded 头。
-export const PUBLIC_ORIGIN = ''; // Set a fixed HTTPS origin before deployment.
+export const PUBLIC_ORIGIN = 'https://eduai-o1pbxkl2opq.qoder.zone';
 
 export const BODY_LIMIT_BYTES = 8192;
 
@@ -38,7 +38,16 @@ export function requireTrustedOrigin(request, origin = PUBLIC_ORIGIN) {
   try { configured = new URL(origin); } catch { throw new AppError('application_auth_not_configured', 503); }
   if (configured.protocol !== 'https:' || configured.origin !== origin) throw new AppError('application_auth_not_configured', 503);
   if (['GET', 'HEAD', 'OPTIONS'].includes(request.method)) return;
-  if (request.headers.get('origin') !== origin) throw new AppError('origin_forbidden', 403);
+  const received = request.headers.get('origin');
+  if (received !== origin) {
+    // 诊断只记录来源域名（公开信息），不记录任何凭据或完整请求头。
+    let receivedHost = 'missing';
+    if (received !== null) {
+      try { receivedHost = new URL(received).host || 'invalid'; } catch { receivedHost = 'invalid'; }
+    }
+    console.log(JSON.stringify({ event: 'origin_rejected', received_host: receivedHost, configured_host: configured.host }));
+    throw new AppError('origin_forbidden', 403);
+  }
 }
 
 // 按实际流读取的字节数设上限，不信任 Content-Length。

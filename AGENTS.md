@@ -117,4 +117,15 @@ node --test dev/check.mjs # 后端契约测试
 - [ ] 模块5：高校与录取数据查询 + 官方数据导入工具
 - [ ] 模块6：兴趣测评与职业探索
 - [ ] 模块7：个人中心完善
-- [ ] 模块8：云端分配、测试、部署上线
+- [x] 模块8：云端分配、测试、部署上线（站点 https://eduai-o1pbxkl2opq.qoder.zone ，selected 访问；数据库/函数/存储已就绪，users/sessions/auth_limiter 三表已应用，完整版本已发布。注意：站点地址在设置中改过，functions/http.mjs 的 PUBLIC_ORIGIN 必须与当前地址一致，否则写请求被 CSRF 校验拒绝）
+
+### 运行时验收表（2026-11-18，目标：首个完整发布版本）
+
+| 层 | 检查 | 状态 | 证据 / 阻塞 |
+| --- | --- | --- | --- |
+| 本地 | 构建 + 13 项认证契约测试 | passed | `node --test dev/check.mjs` 全部通过 |
+| 控制面 | 后端分配、迁移应用、发布提交 | passed | function_backend 就绪；三表已验证；发布操作 succeeded/committed |
+| 浏览器 | 注册/登录/会话恢复/退出真实流程 | pending | 站点私有，需所有者在已登录 Qoder 的浏览器中验证（平台登录与应用登录是两步） |
+| 隔离 | A/B 账号隔离、未授权访问 | pending | 本地契约测试已覆盖逻辑隔离；线上验证待浏览器准入后进行 |
+
+注：私有网关拦截匿名请求（401 sites_gateway_login_required）属预期行为；改为公开访问需所有者单独授权。
