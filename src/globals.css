@@ -1,0 +1,167 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "../vendor/shadcn-tailwind-4.13.0.css";
+
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+}
+
+@utility scrollbar-none {
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@utility scrollbar-gutter-stable {
+  scrollbar-gutter: stable;
+}
+
+/* EduAI 品牌主题：蓝白基底 + 蓝紫渐变（浅色优先） */
+:root {
+  --site-bg: #f5f7fd;
+  --site-fg: #101828;
+  --site-accent: #2563eb;
+  --site-on-accent: #ffffff;
+  --site-surface: #ffffff;
+  --site-muted: #5b6478;
+  --site-border: #e3e8f4;
+  --site-font: "PingFang SC", "Microsoft YaHei", "Source Han Sans SC",
+    system-ui, -apple-system, "Segoe UI", sans-serif;
+  --site-radius: 12px;
+  --site-space: 1;
+  --site-type: 1;
+  --site-motion: 1;
+
+  --edu-violet: #7c3aed;
+  --edu-gradient: linear-gradient(
+    120deg,
+    var(--site-accent),
+    color-mix(in oklab, var(--site-accent) 35%, var(--edu-violet))
+  );
+  --edu-gradient-soft: linear-gradient(
+    120deg,
+    color-mix(in oklab, var(--site-accent) 10%, var(--site-surface)),
+    color-mix(in oklab, var(--edu-violet) 9%, var(--site-surface))
+  );
+}
+
+:root {
+  --background: var(--site-bg);
+  --foreground: var(--site-fg);
+  --card: var(--site-surface);
+  --card-foreground: var(--site-fg);
+  --popover: var(--site-surface);
+  --popover-foreground: var(--site-fg);
+  --primary: var(--site-accent);
+  --primary-foreground: var(--site-on-accent);
+  --secondary: color-mix(in oklab, var(--site-accent) 8%, var(--site-surface));
+  --secondary-foreground: var(--site-fg);
+  --muted: color-mix(in oklab, var(--site-accent) 5%, var(--site-surface));
+  --muted-foreground: var(--site-muted);
+  --accent: color-mix(in oklab, var(--site-accent) 10%, var(--site-surface));
+  --accent-foreground: var(--site-fg);
+  --destructive: #dc2626;
+  --border: var(--site-border);
+  --input: var(--site-border);
+  --ring: color-mix(in oklab, var(--site-accent) 55%, white);
+  --radius: var(--site-radius);
+  --chart-1: var(--site-accent);
+  --chart-2: var(--edu-violet);
+  --chart-3: #0ea5e9;
+  --chart-4: #f59e0b;
+  --chart-5: #10b981;
+  --sidebar: var(--site-surface);
+  --sidebar-foreground: var(--site-fg);
+  --sidebar-primary: var(--site-accent);
+  --sidebar-primary-foreground: var(--site-on-accent);
+  --sidebar-accent: color-mix(in oklab, var(--site-accent) 8%, var(--site-surface));
+  --sidebar-accent-foreground: var(--site-fg);
+  --sidebar-border: var(--site-border);
+  --sidebar-ring: var(--ring);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: var(--site-font);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  --spacing: calc(0.25rem * var(--site-space));
+  --text-xs: calc(.75rem * var(--site-type));
+  --text-sm: calc(.875rem * var(--site-type));
+  --text-base: calc(1rem * var(--site-type));
+  --text-lg: calc(1.125rem * var(--site-type));
+  --text-xl: calc(1.25rem * var(--site-type));
+  --text-2xl: calc(1.5rem * var(--site-type));
+  --text-3xl: calc(1.875rem * var(--site-type));
+  --text-4xl: calc(2.25rem * var(--site-type));
+  --text-5xl: calc(3rem * var(--site-type));
+  --text-6xl: calc(3.75rem * var(--site-type));
+  --text-7xl: calc(4.5rem * var(--site-type));
+  --text-8xl: calc(6rem * var(--site-type));
+  --text-9xl: calc(8rem * var(--site-type));
+  --default-transition-duration: calc(150ms * var(--site-motion));
+}
+
+@layer base {
+  button, a { transition-duration: calc(150ms * var(--site-motion)); }
+  @media (prefers-reduced-motion: reduce) {
+    button, a { transition-duration: 0ms; }
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--site-font);
+}
+
+/* 品牌渐变工具类 */
+@utility edu-gradient {
+  background-image: var(--edu-gradient);
+}
+
+@utility edu-gradient-soft {
+  background-image: var(--edu-gradient-soft);
+}
+
+@utility edu-gradient-text {
+  background-image: var(--edu-gradient);
+  background-clip: text;
+  color: transparent;
+}
