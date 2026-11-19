@@ -72,4 +72,5 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(8000, '127.0.0.1', () => console.log('local fixture function on http://127.0.0.1:8000'));
+const PORT = Number(process.env.EDUAI_FN_PORT || 8000);
+server.listen(PORT, '127.0.0.1', () => console.log(`local fixture function on http://127.0.0.1:${PORT}`));

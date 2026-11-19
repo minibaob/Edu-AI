@@ -937,9 +937,19 @@ test('模块5：多省增量导入元数据合并（索引/筛选面并集、计
   await postMeta(handle, cookie, { key: 'universities_index', value: [{ code: '10001', name: '北京大学' }] });
   await postMeta(handle, cookie, { key: 'score_facets', value: { provinces: ['河北'], years: [2026], categories: ['物理类'], batches: ['本科批'] } });
   await postMeta(handle, cookie, { key: 'plan_facets', value: { provinces: ['河北'], years: [2026], batches: ['本科批'] } });
+  // 索引补发带地区/类型：同代码按字段补全（旧索引只有 code/name），不产生重复行。
+  await postMeta(handle, cookie, { key: 'universities_index', value: [
+    { code: '10003', name: '清华大学', province: '北京', city: '北京', type: '公办', level: '本科', tags: '985/211/双一流' },
+    { code: '10001', name: '北京大学', province: '北京' },
+  ] });
 
   const list = await call(handle, ctx('/api/universities'));
   assert.equal(list.body.universities.length, 2, '院校索引为两省并集，不被新文件覆盖');
+  const tsinghua = list.body.universities.find((x) => x.code === '10003');
+  assert.equal(tsinghua.province, '北京');
+  assert.equal(tsinghua.type, '公办');
+  assert.equal(tsinghua.tags, '985/211/双一流');
+  assert.equal(list.body.universities.find((x) => x.code === '10001').province, '北京');
   assert.deepEqual(list.body.score_facets.provinces, ['河北', '河南']);
   assert.deepEqual(list.body.score_facets.years, [2025, 2026]);
   assert.deepEqual(list.body.score_facets.categories, ['物理类', '理科']);
@@ -955,6 +965,8 @@ test('模块5：多省增量导入元数据合并（索引/筛选面并集、计
   assert.equal(detail.body.scores.length, 2, '已有院校的两省录取按国标代码都可查');
   assert.equal(detail.body.scores[0].province, '河北', '年份倒序');
   assert.equal(detail.body.plans.length, 1, '已有院校的他省计划按名称可查');
+  const bad = await postMeta(handle, cookie, { key: 'universities_index', value: [{ code: '10003', name: '清华大学', province: 'x'.repeat(61) }] });
+  assert.equal(bad.status, 400, '索引地区字段超长被拒绝');
 });
 
 // ---- 模块4 扩展：文件直传直下（平台 Storage 签名上传/下载 + 回读校验） ----

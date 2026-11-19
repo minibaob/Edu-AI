@@ -60,6 +60,14 @@ function dv(records, field) {
   return [...set].sort((a, b) => (typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b))));
 }
 
+function indexEntry(r) {
+  const entry = { code: String(r.code), name: String(r.name) };
+  for (const field of ['province', 'city', 'type', 'level', 'tags']) {
+    if (typeof r[field] === 'string' && r[field] !== '') entry[field] = r[field];
+  }
+  return entry;
+}
+
 async function call(handle, p, { method = 'GET', body, cookie } = {}) {
   const headers = { origin: ORIGIN };
   if (cookie) headers.cookie = cookie;
@@ -100,7 +108,7 @@ export async function seedLocal(handle, db, dir) {
       inserted += r.json.inserted;
     }
     if (table === 'universities') {
-      const m = await call(handle, '/api/admin/meta', { method: 'POST', cookie, body: { key: 'universities_index', value: records.map((r) => ({ code: String(r.code), name: String(r.name) })) } });
+      const m = await call(handle, '/api/admin/meta', { method: 'POST', cookie, body: { key: 'universities_index', value: records.map((r) => indexEntry(r)) } });
       if (m.status !== 200) throw new Error(`meta universities_index failed: ${m.status} ${JSON.stringify(m.json)}`);
     } else if (table === 'admission_scores') {
       const m = await call(handle, '/api/admin/meta', { method: 'POST', cookie, body: { key: 'score_facets', value: { provinces: dv(records, 'province'), years: dv(records, 'year'), categories: dv(records, 'category'), batches: dv(records, 'batch') } } });

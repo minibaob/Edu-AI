@@ -84,7 +84,14 @@ export default function AdminImportPage() {
 
   async function publishMeta(table: ImportTable, records: ImportRecord[]) {
     if (table === "universities") {
-      await postMeta("universities_index", records.map((r) => ({ code: String(r.code), name: String(r.name) })));
+      await postMeta("universities_index", records.map((r) => {
+        const entry: Record<string, string> = { code: String(r.code), name: String(r.name) };
+        for (const field of ["province", "city", "type", "level", "tags"]) {
+          const v = r[field];
+          if (typeof v === "string" && v !== "") entry[field] = v;
+        }
+        return entry;
+      }));
     } else if (table === "admission_scores") {
       await postMeta("score_facets", {
         provinces: distinctValues(records, "province"),

@@ -2,7 +2,7 @@ import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const proxy = { "/functions/v1/app": "http://127.0.0.1:8000" };
+const proxy = { "/functions/v1/app": `http://127.0.0.1:${process.env.EDUAI_FN_PORT || 8000}` };
 
 export default defineConfig({
   plugins: [react()],

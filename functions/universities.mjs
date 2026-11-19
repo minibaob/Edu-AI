@@ -119,11 +119,22 @@ function validateMetaValue(key, value) {
   if (!value || typeof value !== 'object') throw new AppError('invalid_input', 400);
   if (key === 'universities_index') {
     if (!Array.isArray(value) || value.length > 10000) throw new AppError('invalid_input', 400);
+    const INDEX_TEXT_FIELDS = ['province', 'city', 'type', 'level', 'tags'];
     for (const item of value) {
       if (typeof item?.code !== 'string' || typeof item?.name !== 'string'
         || item.code.length > 32 || item.name.length > 120) throw new AppError('invalid_input', 400);
+      for (const field of INDEX_TEXT_FIELDS) {
+        const v = item[field];
+        if (v !== undefined && v !== null && (typeof v !== 'string' || v.length > 60)) throw new AppError('invalid_input', 400);
+      }
     }
-    return value.map((item) => ({ code: item.code, name: item.name }));
+    return value.map((item) => {
+      const out = { code: item.code, name: item.name };
+      for (const field of INDEX_TEXT_FIELDS) {
+        if (typeof item[field] === 'string' && item[field] !== '') out[field] = item[field];
+      }
+      return out;
+    });
   }
   if (key === 'counts') {
     const out = {};
@@ -170,13 +181,13 @@ async function mergeMeta(db, key, value) {
   const existing = await readMeta(db, key);
   if (key === 'universities_index') {
     const base = Array.isArray(existing) ? existing : [];
-    const seen = new Set(base.map((item) => item.code));
-    const merged = [...base];
+    const byCode = new Map(base.map((item) => [item.code, { ...item }]));
     for (const item of value) {
-      if (seen.has(item.code)) continue;
-      seen.add(item.code);
-      merged.push(item);
+      const prev = byCode.get(item.code);
+      // 同代码再次导入时按字段补全/更新（如旧索引只有 code/name，新批次带地区/类型）。
+      byCode.set(item.code, prev ? { ...prev, ...item } : { ...item });
     }
+    const merged = [...byCode.values()];
     if (merged.length > 10000) throw new AppError('invalid_input', 400);
     return merged;
   }
