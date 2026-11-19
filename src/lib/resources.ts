@@ -1,5 +1,5 @@
 // 模块4 学习资料库：前端 API 客户端。
-// 资料分两种：来源链接型（source_url，可直接打开）与文件型（待平台 Storage 接入后开放上传）。
+// 资料分两种：来源链接型（source_url，可直接打开）与文件型（平台 Storage 签名直传）。
 import { api } from "@/src/lib/api";
 
 export type Resource = {
@@ -15,6 +15,7 @@ export type Resource = {
   file_name: string | null;
   file_size: number | null;
   mime: string | null;
+  has_file: boolean;
   copyright_confirmed: boolean;
   favorited: boolean;
   created_at: string;
@@ -35,10 +36,13 @@ export type ResourceInput = {
   grade?: string;
   subject?: string;
   type: string;
-  source_url: string;
+  source_url?: string;
   source_name: string;
   description?: string;
   copyright_confirmed: boolean;
+  storage_key?: string;
+  file_name?: string;
+  file_size?: number;
 };
 
 export async function listResources(filters: ResourceFilters = {}): Promise<{ total: number; items: Resource[] }> {
@@ -72,4 +76,36 @@ export async function unfavoriteResource(id: string): Promise<{ favorited: boole
 
 export async function listFavorites(): Promise<{ total: number; items: Resource[] }> {
   return api<{ total: number; items: Resource[] }>("/api/favorites");
+}
+
+// ---- 文件直传直下 ----
+export type UploadIntent = {
+  uploadUrl: string;
+  storageKey: string;
+  contentType: string;
+  maxBytes: number;
+};
+
+export async function requestUploadUrl(input: { file_name: string; file_size: number }): Promise<UploadIntent> {
+  return api<UploadIntent>("/api/resources/upload-url", { method: "POST", body: input });
+}
+
+// 浏览器把文件 PUT 到签名 URL（同源），Content-Type 用服务端签发时给定的值。
+export async function putFileToSignedUrl(uploadUrl: string, file: File, contentType: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(uploadUrl, {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": contentType },
+      body: file,
+    });
+  } catch {
+    throw new Error("network");
+  }
+  if (!response.ok) throw new Error("upload_failed");
+}
+
+export async function getFileDownloadUrl(id: string): Promise<{ downloadUrl: string; file_name: string; file_size: number; mime: string }> {
+  return api(`/api/resources/${encodeURIComponent(id)}/file`);
 }

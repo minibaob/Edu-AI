@@ -36,6 +36,8 @@ type FavoriteItem = {
 
 type AssessmentItem = {
   id: string;
+  kind: string;
+  code: string;
   scores: Record<string, number>;
   top_types: string[];
   created_at: string;
@@ -407,14 +409,15 @@ export default function ProfilePage() {
                 <p className="text-sm font-medium">
                   {new Date(item.created_at).toLocaleDateString("zh-CN")}
                   <span className="ml-2 font-normal text-muted-foreground">
-                    主要倾向：
-                    {item.top_types.map((code) => `${code} · ${DIMENSION_NAMES[code] ?? code}`).join("、")}
+                    {item.kind === "mbti"
+                      ? `性格倾向（简化版）：${item.code}`
+                      : `主要倾向：${item.top_types.map((code) => `${code} · ${DIMENSION_NAMES[code] ?? code}`).join("、")}`}
                   </span>
                 </p>
                 <p className="mt-1.5 flex flex-wrap gap-1.5">
                   {Object.entries(item.scores).map(([code, score]) => (
                     <Badge key={code} variant="secondary">
-                      {code} {score} 分
+                      {code} {score} {item.kind === "mbti" ? "票" : "分"}
                     </Badge>
                   ))}
                 </p>

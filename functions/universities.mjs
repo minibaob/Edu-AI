@@ -17,7 +17,7 @@ function metaValue(row) {
   return typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
 }
 
-async function readMeta(db, key) {
+export async function readMeta(db, key) {
   const found = rows(await db.from('data_meta').select('value').eq('key', key).limit(1));
   return found.length === 1 ? metaValue(found[0]) : null;
 }
@@ -104,6 +104,12 @@ export async function importChunk(db, request) {
     }
     inserted = await insertRecords(db, table, records, 'id');
   }
+  // 计数由服务端按实际插入行数累加：多省增量导入不覆盖他省计数，幂等重跑不增。
+  if (inserted > 0) {
+    const counts = (await readMeta(db, 'counts')) ?? { universities: 0, admission_scores: 0, enrollment_plans: 0 };
+    counts[table] = (counts[table] ?? 0) + inserted;
+    if (!(await writeMeta(db, 'counts', counts))) return errorJson('meta_unconfirmed', 503);
+  }
   return json({ ok: true, table, chunk_index: chunkIndex, received: cleaned.length, inserted });
 }
 
@@ -146,19 +152,51 @@ function validateMetaValue(key, value) {
   return out;
 }
 
-export async function updateMeta(db, request) {
-  // 院校索引可达数百 KB，使用与导入相同的较大正文上限。
-  const body = await readJson(request, IMPORT_BODY_LIMIT);
-  const key = body?.key;
-  if (!META_KEYS.includes(key)) throw new AppError('invalid_input', 400);
-  const value = validateMetaValue(key, body?.value);
+async function writeMeta(db, key, value) {
   const now = new Date().toISOString();
   const payload = { key, value: JSON.stringify(value), updated_at: now };
   const created = rows(await db.from('data_meta').insertIfAbsent(payload, { onConflict: 'key' }).select('key'));
   if (created.length !== 1) {
     const updated = rows(await db.from('data_meta').update({ value: payload.value, updated_at: now })
       .eq('key', key).select('key'));
-    if (updated.length !== 1) return errorJson('meta_unconfirmed', 503);
+    if (updated.length !== 1) return false;
   }
+  return true;
+}
+
+// 多省增量导入：索引按代码并集、筛选面按字段并集，已有省份的元数据不被新文件覆盖。
+async function mergeMeta(db, key, value) {
+  if (key === 'counts') return value;
+  const existing = await readMeta(db, key);
+  if (key === 'universities_index') {
+    const base = Array.isArray(existing) ? existing : [];
+    const seen = new Set(base.map((item) => item.code));
+    const merged = [...base];
+    for (const item of value) {
+      if (seen.has(item.code)) continue;
+      seen.add(item.code);
+      merged.push(item);
+    }
+    if (merged.length > 10000) throw new AppError('invalid_input', 400);
+    return merged;
+  }
+  const base = existing && typeof existing === 'object' ? existing : {};
+  const merged = { ...base };
+  for (const field of Object.keys(value)) {
+    const prev = Array.isArray(base[field]) ? base[field] : [];
+    const union = [...new Set([...prev, ...value[field]])];
+    merged[field] = field === 'years' ? union.sort((a, b) => a - b) : union.sort();
+  }
+  return merged;
+}
+
+export async function updateMeta(db, request) {
+  // 院校索引可达数百 KB，使用与导入相同的较大正文上限。
+  const body = await readJson(request, IMPORT_BODY_LIMIT);
+  const key = body?.key;
+  if (!META_KEYS.includes(key)) throw new AppError('invalid_input', 400);
+  const value = validateMetaValue(key, body?.value);
+  const merged = await mergeMeta(db, key, value);
+  if (!(await writeMeta(db, key, merged))) return errorJson('meta_unconfirmed', 503);
   return json({ ok: true, key });
 }

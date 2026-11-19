@@ -1,5 +1,6 @@
 // 模块5 官方数据导入模板的离线校验：只检查格式/枚举/范围/重复键/跨表引用。
-// 不连接数据库、不导入数据。用法：node db/import/validate.mjs <存放四个CSV的目录>
+// 不连接数据库、不导入数据。用法：node db/import/validate.mjs <存放四个CSV的目录> [已有universities.csv]
+// 增量批次（如河北只登记新校）传第二个参数：跨表引用按「本批次 + 已有清单」并集检查。
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -109,7 +110,7 @@ function loadTable(dir, name) {
 
 const dir = process.argv[2];
 if (!dir) {
-  console.error('用法：node db/import/validate.mjs <存放四个CSV的目录>');
+  console.error('用法：node db/import/validate.mjs <存放四个CSV的目录> [已有universities.csv]');
   process.exit(2);
 }
 
@@ -142,6 +143,22 @@ for (const row of universities) {
   if (row['学校名称'] !== '') {
     if (universityNames.has(row['学校名称'])) fail(f, l, `学校名称「${row['学校名称']}」重复`);
     universityNames.add(row['学校名称']);
+  }
+}
+
+const existingRegistry = process.argv[3];
+if (existingRegistry) {
+  const grid = parseCsv(fs.readFileSync(existingRegistry, 'utf8'));
+  const header = (grid[0] ?? []).map((cell) => cell.trim());
+  const codeIndex = header.indexOf('院校代码');
+  const nameIndex = header.indexOf('学校名称');
+  if (codeIndex < 0 || nameIndex < 0) {
+    errors.push(`已有清单 ${existingRegistry} 表头缺少 院校代码/学校名称`);
+  } else {
+    for (const row of grid.slice(1)) {
+      if (row[codeIndex]) universityCodes.add(row[codeIndex].trim());
+      if (row[nameIndex]) universityNames.add(row[nameIndex].trim());
+    }
   }
 }
 
