@@ -100,8 +100,12 @@ async function stats(db, request) {
     } catch {
       favoritesCount = null;
     }
-    assessmentsCount = await countRows(db, 'assessments', { user_id: userId });
-    assessmentsCapped = assessmentsCount === COUNT_LIMIT;
+    const assessmentsNew = await countRows(db, 'assessments', { user_id: userId });
+    const assessmentsLegacy = await countRows(db, 'assessment_results', { user_id: userId });
+    // 历史合并两张表（30 题/MBTI 在 assessments，24 题在 assessment_results）；
+    // 任一表不可读时总数无法确认，如实返回 null。
+    assessmentsCount = assessmentsNew == null || assessmentsLegacy == null ? null : assessmentsNew + assessmentsLegacy;
+    assessmentsCapped = assessmentsNew === COUNT_LIMIT || assessmentsLegacy === COUNT_LIMIT;
   }
   return json({
     stats: {
@@ -564,6 +568,9 @@ async function saveAssessment(db, request, session) {
   }, 201);
 }
 
+// 个人测评历史：合并 assessments（30 题霍兰德 / MBTI）与 assessment_results
+// （24 题 5 级量表霍兰德）两张表，只读会话用户自己的记录，按时间倒序取前 50。
+// version 区分霍兰德题量（24/30），MBTI 为 null。
 async function listAssessments(db, request, session) {
   const found = rows(await db.from('assessments').select('id,kind,code,scores,created_at')
     .eq('user_id', session.userId)
@@ -574,13 +581,31 @@ async function listAssessments(db, request, session) {
     return {
       id: row.id,
       kind,
+      version: kind === 'riasec' ? 30 : null,
       code: row.code,
       scores,
       top_types: kind === 'mbti' ? [row.code] : String(row.code).split(''),
       created_at: row.created_at,
     };
   });
-  return json({ total: items.length, items });
+  const legacy = rows(await db.from('assessment_results').select('id,scores,top_types,created_at')
+    .eq('user_id', session.userId)
+    .order('created_at', { ascending: false }).limit(50));
+  for (const row of legacy) {
+    const topTypes = typeof row.top_types === 'string' ? JSON.parse(row.top_types) : row.top_types;
+    items.push({
+      id: row.id,
+      kind: 'riasec',
+      version: 24,
+      code: topTypes.join(''),
+      scores: typeof row.scores === 'string' ? JSON.parse(row.scores) : row.scores,
+      top_types: topTypes,
+      created_at: row.created_at,
+    });
+  }
+  items.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  const page = items.slice(0, 50);
+  return json({ total: page.length, items: page });
 }
 
 async function route(db, request, origin, storage) {

@@ -534,7 +534,7 @@ test('测评保存：未登录拒绝、非法答案 400、后端按固定规则�
   assert.deepEqual(savedMixed.body.assessment.top_types, ['R', 'C']);
 });
 
-test('遗留测评保存（POST /api/assessments）：只写 assessment_results、归属来自会话', async () => {
+test('24 题测评保存（POST /api/assessments）：只写 assessment_results、归属来自会话、并入个人历史', async () => {
   const { db, handle } = fixture();
   const cookieA = cookiePair(await register(handle, uniqueName()));
   const cookieB = cookiePair(await register(handle, uniqueName()));
@@ -545,9 +545,13 @@ test('遗留测评保存（POST /api/assessments）：只写 assessment_results�
   assert.equal(dump.length, 1);
   assert.deepEqual(JSON.parse(dump[0].scores), { R: 50, I: 50, A: 50, S: 50, E: 50, C: 50 });
   assert.equal(dump[0].user_id, (await me(handle, cookieA)).body.user.id);
-  // GET 历史读 assessments 表（霍兰德/MBTI 双 kind），遗留写入不混入。
+  // GET 历史合并两张表：24 题记录带 version=24 出现在个人历史，B 看不到。
   const listA = await call(handle, ctx('/api/assessments', { cookie: cookieA }));
-  assert.equal(listA.body.total, 0);
+  assert.equal(listA.body.total, 1);
+  assert.equal(listA.body.items[0].kind, 'riasec');
+  assert.equal(listA.body.items[0].version, 24);
+  assert.deepEqual(listA.body.items[0].scores, { R: 50, I: 50, A: 50, S: 50, E: 50, C: 50 });
+  assert.deepEqual(listA.body.items[0].top_types, ['R', 'I']);
   const listB = await call(handle, ctx('/api/assessments', { cookie: cookieB }));
   assert.equal(listB.body.total, 0, 'B 看不到 A 的测评记录');
 });
@@ -969,7 +973,7 @@ const uploadUrl = (handle, cookie, body) =>
 const finalizeFile = (handle, cookie, body) =>
   call(handle, ctx('/api/resources', { method: 'POST', cookie, body }));
 
-test('测评记录：登录门槛、只看自己的、两种测评按时间倒序共存', async () => {
+test('测评记录：登录门槛、只看自己的、三种测评按时间倒序共存', async () => {
   const { handle } = fixture();
   assert.equal((await call(handle, ctx('/api/assessments'))).status, 401);
   assert.equal((await call(handle, ctx('/api/assessments', { method: 'POST', body: {} }))).status, 401);
@@ -979,16 +983,24 @@ test('测评记录：登录门槛、只看自己的、两种测评按时间倒�
 
   await submit(handle, cookieA, allAnswers(2));
   await tick();
+  await call(handle, ctx('/api/assessments', { method: 'POST', cookie: cookieA, body: { answers: Array(24).fill(3) } }));
+  await tick();
   await mbtiSubmit(handle, cookieA, mbtiAll(0));
 
   const listA = await call(handle, ctx('/api/assessments', { cookie: cookieA }));
-  assert.equal(listA.body.total, 2);
+  assert.equal(listA.body.total, 3);
   assert.equal(listA.body.items[0].kind, 'mbti');
+  assert.equal(listA.body.items[0].version, null);
   assert.equal(listA.body.items[0].code, 'ESTJ');
   assert.deepEqual(listA.body.items[0].top_types, ['ESTJ']);
   assert.equal(listA.body.items[1].kind, 'riasec');
-  assert.deepEqual(listA.body.items[1].scores, { R: 10, I: 10, A: 10, S: 10, E: 10, C: 10 });
-  assert.deepEqual(listA.body.items[1].top_types, ['R', 'I', 'A']);
+  assert.equal(listA.body.items[1].version, 24);
+  assert.deepEqual(listA.body.items[1].scores, { R: 50, I: 50, A: 50, S: 50, E: 50, C: 50 });
+  assert.deepEqual(listA.body.items[1].top_types, ['R', 'I']);
+  assert.equal(listA.body.items[2].kind, 'riasec');
+  assert.equal(listA.body.items[2].version, 30);
+  assert.deepEqual(listA.body.items[2].scores, { R: 10, I: 10, A: 10, S: 10, E: 10, C: 10 });
+  assert.deepEqual(listA.body.items[2].top_types, ['R', 'I', 'A']);
   const listB = await call(handle, ctx('/api/assessments', { cookie: cookieB }));
   assert.equal(listB.body.total, 0, 'B 看不到 A 的测评记录');
 });
@@ -1043,6 +1055,10 @@ test('首页统计：公开读；未登录个人计数为 null；计数反映真
     { id: 'a1', user_id: userId, kind: 'riasec', answers: '[]', scores: '{}', code: 'RIA', created_at: new Date().toISOString() },
     { onConflict: 'id' },
   );
+  await db.from('assessment_results').insertIfAbsent(
+    { id: 'ar1', user_id: userId, answers: '[]', scores: '{"R":50}', top_types: '["R","I"]', created_at: new Date().toISOString() },
+    { onConflict: 'id' },
+  );
 
   const counted = await call(handle, ctx('/api/stats', { cookie }));
   assert.deepEqual(counted.body.stats, {
@@ -1051,7 +1067,7 @@ test('首页统计：公开读；未登录个人计数为 null；计数反映真
     universities_total: 2400,
     favorites_count: 1, // 已取消收藏的那条不计入
     favorites_capped: false,
-    assessments_count: 1,
+    assessments_count: 2, // 两张测评表合并计数，与个人中心历史一致
     assessments_capped: false,
   });
 
@@ -1190,4 +1206,104 @@ test('模块4文件：固定来源校验（CSRF）覆盖上传与登记', async 
   const evil = await call(handle, ctx('/api/resources/upload-url', { method: 'POST', cookie, origin: 'https://evil.test', body: { file_name: 'a.pdf', file_size: 10 } }));
   assert.equal(evil.status, 403);
   assert.equal(evil.body.error, 'origin_forbidden');
+});
+
+// ---- 阶段8：全站权限矩阵（匿名拒绝、学生越权拒绝、参数篡改无效） ----
+
+test('阶段8权限：受保护接口匿名一律 401，学生访问管理员接口 403，公开读不受影响', async () => {
+  const storage = createFakeStorage();
+  const { handle } = fixture(storage);
+  const rid = '00000000-0000-0000-0000-000000000000';
+
+  const anonGets = [
+    '/api/me', '/api/favorites', '/api/assessments',
+    '/api/assessment/questions', '/api/assessment/latest',
+    '/api/mbti/questions', '/api/mbti/latest',
+    '/api/resources?mine=1', `/api/resources/${rid}/file`,
+  ];
+  for (const path of anonGets) {
+    const res = await call(handle, ctx(path));
+    assert.equal(res.status, 401, `匿名 GET ${path} 应 401`);
+    assert.equal(res.body.error, 'login_required');
+  }
+  const anonPosts = [
+    ['/api/profile', { grade: '高一' }],
+    ['/api/password', { current_password: 'wrong', new_password: 'yyyyyyyy' }],
+    ['/api/assessments', { answers: Array(24).fill(3) }],
+    ['/api/assessment/submit', { answers: {} }],
+    ['/api/mbti/submit', { answers: {} }],
+    ['/api/resources', RESOURCE_BODY],
+    ['/api/resources/upload-url', { file_name: 'a.pdf', file_size: 10 }],
+    [`/api/resources/${rid}/favorite`, {}],
+    [`/api/resources/${rid}/unfavorite`, {}],
+    ['/api/admin/import', chunk('universities', [UNIVERSITY_ROW])],
+    ['/api/admin/meta', { key: 'counts', value: {} }],
+  ];
+  for (const [path, body] of anonPosts) {
+    const res = await call(handle, ctx(path, { method: 'POST', body }));
+    assert.equal(res.status, 401, `匿名 POST ${path} 应 401`);
+    assert.equal(res.body.error, 'login_required');
+  }
+
+  // 公开读接口匿名可用（共享学习资料与官方数据查询）。
+  assert.equal((await call(handle, ctx('/api/resources'))).status, 200);
+  assert.equal((await call(handle, ctx(`/api/resources/${rid}`))).status, 404, '公开读但未知 id 仍 404');
+  assert.equal((await call(handle, ctx('/api/universities'))).status, 200);
+  assert.equal((await call(handle, ctx('/api/majors'))).status, 200);
+  assert.equal((await call(handle, ctx('/api/stats'))).status, 200);
+
+  // 学生（非管理员）访问导入/元数据接口一律 403。
+  const student = cookiePair(await register(handle, uniqueName('stu')));
+  const imp = await postImport(handle, student, chunk('universities', [UNIVERSITY_ROW]));
+  assert.equal(imp.status, 403);
+  assert.equal(imp.body.error, 'admin_required');
+  const meta = await postMeta(handle, student, { key: 'counts', value: { universities: 0, admission_scores: 0, enrollment_plans: 0 } });
+  assert.equal(meta.status, 403);
+  assert.equal(meta.body.error, 'admin_required');
+});
+
+test('阶段8权限：请求体篡改 id/role/user_id 一律无效，归属只来自会话', async () => {
+  const { db, handle } = fixture();
+  const a = await register(handle, uniqueName('alpha'));
+  const b = await register(handle, uniqueName('bravo'));
+  const cookieA = cookiePair(a), cookieB = cookiePair(b);
+  const idA = a.body.user.id, idB = b.body.user.id;
+
+  // 资料：试图提升角色、改用户名、指向他人 id，全部被白名单忽略。
+  const tampered = await call(handle, ctx('/api/profile', {
+    method: 'POST', cookie: cookieA,
+    body: { display_name: '甲同学', id: idB, user_id: idB, role: 'admin', username: 'hacked', password_hash: 'x' },
+  }));
+  assert.equal(tampered.status, 200);
+  assert.equal(tampered.body.user.id, idA);
+  assert.equal(tampered.body.user.role, 'student');
+  assert.equal(tampered.body.user.username, a.body.user.username);
+  const rowA = db.dump('users').find((u) => u.id === idA);
+  const rowB = db.dump('users').find((u) => u.id === idB);
+  assert.equal(rowA.role, 'student', 'role 不得通过资料接口提升');
+  assert.notEqual(rowA.password_hash, 'x');
+  assert.equal(rowB.role, 'student');
+  assert.equal(rowB.display_name, null, 'B 的资料不受影响');
+
+  // 三种测评提交塞 user_id：写入成功但归属仍是会话用户。
+  const saved24 = await call(handle, ctx('/api/assessments', { method: 'POST', cookie: cookieA, body: { answers: Array(24).fill(3), user_id: idB } }));
+  assert.equal(saved24.status, 201);
+  assert.equal(db.dump('assessment_results')[0].user_id, idA);
+  const saved30 = await call(handle, ctx('/api/assessment/submit', { method: 'POST', cookie: cookieA, body: { answers: allAnswers(1), user_id: idB } }));
+  assert.equal(saved30.status, 201);
+  const savedMbti = await call(handle, ctx('/api/mbti/submit', { method: 'POST', cookie: cookieA, body: { answers: mbtiAll(0), user_id: idB } }));
+  assert.equal(savedMbti.status, 201);
+  assert.ok(db.dump('assessments').every((row) => row.user_id === idA));
+
+  // B 的历史看不到 A 的任何记录；A 能看到自己全部三条。
+  assert.equal((await call(handle, ctx('/api/assessments', { cookie: cookieB }))).body.total, 0);
+  assert.equal((await call(handle, ctx('/api/assessments', { cookie: cookieA }))).body.total, 3);
+
+  // 改密请求体塞他人 id 无效：B 的原口令仍可登录。
+  const pw = await call(handle, ctx('/api/password', {
+    method: 'POST', cookie: cookieA,
+    body: { current_password: PASSWORD, new_password: `np-${crypto.randomUUID()}`, id: idB, user_id: idB },
+  }));
+  assert.equal(pw.status, 200);
+  assert.equal((await login(handle, b.body.user.username, PASSWORD)).status, 200, 'B 的口令不得被 A 的请求改动');
 });
