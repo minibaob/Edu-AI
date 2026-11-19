@@ -153,7 +153,7 @@ node --test dev/check.mjs # 后端契约测试
 | 本地 | 构建 + 34 项契约测试（认证 13 + 霍兰德 3 + MBTI 3 + 模块5 8 + 模块4 4 + 模块7 1 + 模块3 2） | passed | `npm run build`、`node --test dev/check.mjs` 全部通过 |
 | 本地浏览器 | 注册→登记资料（版权承诺/来源链接）→列表/详情/收藏→我的收藏→双测评提交→个人中心记录与资料保存→刷新持久化→首页真实统计与演示标签 | passed | dev/server-local.mjs + 假数据库实测；统计 1 份/1 收藏/2 测评，院校无元数据时如实「暂无数据」 |
 | 控制面 | resources/favorites 迁移应用 | passed | clientMigrationId module4-resources-favorites-v1，操作 succeeded；策略 function_backend 与现有表一致 |
-| 线上 | 发布移植版 | pending | 待发布操作与回执 |
+| 线上 | 发布移植版 | passed | 发布操作 succeeded/committed，published=true（actionId f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809123）；访问保持 selected |
 | 线上浏览器 | 移植功能真实流程抽查 | pending | selected 访问需所有者已登录 Qoder 的浏览器 |
 
 注：资料文件直传仍未开放（平台 Storage 适配器未接通），登记接口对 file_* 字段明确拒绝；多省增量导入的元数据服务端合并更新仍为已知限制（当前元数据按整文件覆盖），待所有者确认后另行开发。
