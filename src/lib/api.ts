@@ -56,6 +56,10 @@ const ERROR_MESSAGES: Record<string, string> = {
   admin_required: "此操作需要管理员权限",
   not_found: "未找到该院校",
   meta_unconfirmed: "展示元数据保存未确认，请重试",
+  invalid_filter: "筛选条件不正确，请调整后重试",
+  invalid_resource: "资料信息不完整或格式不正确，请检查标题、类型、来源链接与版权承诺",
+  file_upload_unavailable: "文件直传尚未开放，当前仅支持登记来源链接型资料",
+  resource_unconfirmed: "登记结果未确认，请刷新查看是否已保存，勿重复提交",
 };
 
 export function errorMessage(error: unknown): string {

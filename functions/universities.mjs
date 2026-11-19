@@ -17,7 +17,7 @@ function metaValue(row) {
   return typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
 }
 
-async function readMeta(db, key) {
+export async function readMeta(db, key) {
   const found = rows(await db.from('data_meta').select('value').eq('key', key).limit(1));
   return found.length === 1 ? metaValue(found[0]) : null;
 }

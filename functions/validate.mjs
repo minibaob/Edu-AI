@@ -78,3 +78,68 @@ export function isUuid(value) {
   return typeof value === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 }
+
+// 列表查询通用参数：q（关键词 ≤50 字）、分页 limit 1–100（默认 20）、offset ≥0。
+export function parseListQuery(search) {
+  const params = new URLSearchParams(search ?? '');
+  const q = (params.get('q') ?? '').trim();
+  if ([...q].length > 50) throw new AppError('invalid_filter', 400);
+  const limitRaw = params.get('limit');
+  const offsetRaw = params.get('offset');
+  const limit = limitRaw === null ? 20 : Number(limitRaw);
+  const offset = offsetRaw === null ? 0 : Number(offsetRaw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new AppError('invalid_filter', 400);
+  if (!Number.isInteger(offset) || offset < 0) throw new AppError('invalid_filter', 400);
+  return { q, limit, offset };
+}
+
+// ---- 模块4：学习资料库 ----
+export const RESOURCE_TYPES = ['教材', '知识点', '笔记', '试卷', '模拟卷', '真题', '其他'];
+const RESOURCE_TITLE_MIN = 2;
+const RESOURCE_TITLE_MAX = 100;
+const RESOURCE_DESC_MAX = 500;
+const RESOURCE_URL_MAX = 500;
+
+// 来源链接型资料登记：标题/类型/来源链接/来源名称必填，版权承诺必须勾选。
+// 文件直传待平台 Storage 适配器接通后开启：body 里出现任何 file_* 字段即拒绝，
+// 并返回 file_upload_unavailable，绝不把文件元数据写成“已上传”。
+export function validateResourceInput(body) {
+  if (body?.file_name !== undefined && body?.file_name !== null
+    || body?.file_size !== undefined && body?.file_size !== null
+    || body?.mime !== undefined && body?.mime !== null
+    || body?.storage_key !== undefined && body?.storage_key !== null) {
+    throw new AppError('file_upload_unavailable', 400);
+  }
+  const title = typeof body?.title === 'string' ? body.title.trim() : '';
+  if ([...title].length < RESOURCE_TITLE_MIN || [...title].length > RESOURCE_TITLE_MAX) {
+    throw new AppError('invalid_resource', 400);
+  }
+  const grade = body?.grade;
+  if (grade !== undefined && grade !== null && grade !== '' && !GRADES.includes(grade)) {
+    throw new AppError('invalid_resource', 400);
+  }
+  const subject = body?.subject;
+  if (subject !== undefined && subject !== null && subject !== '' && !SUBJECTS.includes(subject)) {
+    throw new AppError('invalid_resource', 400);
+  }
+  if (!RESOURCE_TYPES.includes(body?.type)) throw new AppError('invalid_resource', 400);
+  const sourceUrl = typeof body?.source_url === 'string' ? body.source_url.trim() : '';
+  if (sourceUrl.length === 0 || sourceUrl.length > RESOURCE_URL_MAX) throw new AppError('invalid_resource', 400);
+  let parsed;
+  try { parsed = new URL(sourceUrl); } catch { throw new AppError('invalid_resource', 400); }
+  if (parsed.protocol !== 'https:') throw new AppError('invalid_resource', 400);
+  const sourceName = typeof body?.source_name === 'string' ? body.source_name.trim() : '';
+  if ([...sourceName].length < 1 || [...sourceName].length > 50) throw new AppError('invalid_resource', 400);
+  const description = typeof body?.description === 'string' ? body.description.trim() : '';
+  if ([...description].length > RESOURCE_DESC_MAX) throw new AppError('invalid_resource', 400);
+  if (body?.copyright_confirmed !== true) throw new AppError('invalid_resource', 400);
+  return {
+    title,
+    grade: grade || null,
+    subject: subject || null,
+    type: body.type,
+    source_url: sourceUrl,
+    source_name: sourceName,
+    description: description === '' ? null : description,
+  };
+}

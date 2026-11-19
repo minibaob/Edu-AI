@@ -679,3 +679,261 @@ test('模块5：写入被拒不回退；响应丢失经确定性主键恢复不�
   assert.equal(retry.body.inserted, 0);
   assert.equal(db.dump('enrollment_plans').length, 2);
 });
+
+// ---- 模块4：学习资料库（来源链接型登记 + 收藏软删除） ----
+// 种子数据只存在于测试用的假数据库中，不进入生产库。
+
+const RESOURCE_BODY = {
+  title: '高中数学函数专题讲义',
+  grade: '高一',
+  subject: '数学',
+  type: '笔记',
+  source_url: 'https://example.edu.cn/math/functions',
+  source_name: '示例出版社官网',
+  description: '函数单调性与奇偶性讲义',
+  copyright_confirmed: true,
+};
+
+async function seedResource(db, ownerId, overrides = {}) {
+  const id = crypto.randomUUID();
+  await db.from('resources').insertIfAbsent({
+    id,
+    owner_id: ownerId,
+    title: '种子资料',
+    grade: '高二',
+    subject: '英语',
+    type: '试卷',
+    source_url: 'https://example.edu.cn/seed',
+    source_name: '种子来源',
+    description: null,
+    file_name: null,
+    file_size: null,
+    mime: null,
+    storage_key: null,
+    copyright_confirmed: true,
+    created_at: new Date().toISOString(),
+    ...overrides,
+  }, { onConflict: 'id' });
+  return id;
+}
+
+test('资料列表：空库、搜索、筛选与分页', async () => {
+  const { handle } = fixture();
+  const empty = await call(handle, ctx('/api/resources'));
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.body, { total: 0, items: [] });
+
+  const { db, handle: h2 } = fixture();
+  await seedResource(db, null, { title: '数学函数讲义', subject: '数学', type: '笔记' });
+  await seedResource(db, null, { title: '英语阅读真题', subject: '英语', type: '真题' });
+  const all = await call(h2, ctx('/api/resources'));
+  assert.equal(all.body.total, 2);
+  const byQ = await call(h2, ctx('/api/resources?q=%E5%87%BD%E6%95%B0'));
+  assert.equal(byQ.body.total, 1);
+  const bySubject = await call(h2, ctx('/api/resources?subject=%E8%8B%B1%E8%AF%AD'));
+  assert.equal(bySubject.body.total, 1);
+  const byType = await call(h2, ctx('/api/resources?type=%E7%9C%9F%E9%A2%98'));
+  assert.equal(byType.body.total, 1);
+  const page = await call(h2, ctx('/api/resources?limit=1&offset=1'));
+  assert.equal(page.body.items.length, 1);
+  assert.equal((await call(h2, ctx('/api/resources?grade=%E5%A4%A7%E4%B8%80'))).status, 400);
+  assert.equal((await call(h2, ctx('/api/resources?limit=0'))).status, 400);
+});
+
+test('资料登记：校验、归属来自会话、文件字段被拒绝', async () => {
+  const { handle } = fixture();
+  assert.equal((await call(handle, ctx('/api/resources', { method: 'POST', body: RESOURCE_BODY }))).status, 401);
+
+  const name = uniqueName();
+  const cookie = cookiePair(await register(handle, name));
+  const meRes = await me(handle, cookie);
+  const userId = meRes.body.user.id;
+
+  const badCases = [
+    [{ ...RESOURCE_BODY, title: '短' }, 'invalid_resource'],
+    [{ ...RESOURCE_BODY, type: '视频' }, 'invalid_resource'],
+    [{ ...RESOURCE_BODY, source_url: 'http://example.edu.cn/x' }, 'invalid_resource'],
+    [{ ...RESOURCE_BODY, source_url: 'not-a-url' }, 'invalid_resource'],
+    [{ ...RESOURCE_BODY, copyright_confirmed: false }, 'invalid_resource'],
+    [{ ...RESOURCE_BODY, file_name: 'a.pdf', file_size: 123, mime: 'application/pdf' }, 'file_upload_unavailable'],
+  ];
+  for (const [body, code] of badCases) {
+    const res = await call(handle, ctx('/api/resources', { method: 'POST', cookie, body }));
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.equal(res.body.error, code);
+  }
+
+  const created = await call(handle, ctx('/api/resources', {
+    method: 'POST', cookie, body: { ...RESOURCE_BODY, owner_id: '00000000-0000-0000-0000-000000000000' },
+  }));
+  assert.equal(created.status, 201);
+  assert.equal(created.body.resource.owner_id, userId, '归属只来自会话，浏览器提交的 owner_id 必须被忽略');
+  assert.equal(created.body.resource.file_name, null);
+
+  const mine = await call(handle, ctx('/api/resources?mine=1', { cookie }));
+  assert.equal(mine.body.total, 1);
+  assert.equal((await call(handle, ctx('/api/resources?mine=1'))).status, 401);
+});
+
+test('资料详情：公开读、未知 id 404、错误方法 405', async () => {
+  const { db, handle } = fixture();
+  const id = await seedResource(db, null);
+  const detail = await call(handle, ctx(`/api/resources/${id}`));
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.resource.title, '种子资料');
+  assert.equal(detail.body.resource.favorited, false);
+  assert.equal((await call(handle, ctx(`/api/resources/${id}`, { method: 'POST', body: {} }))).status, 405);
+  assert.equal((await call(handle, ctx('/api/resources/00000000-0000-0000-0000-000000000000'))).status, 404);
+  assert.equal((await call(handle, ctx('/api/resources/not-a-uuid'))).status, 404);
+});
+
+test('收藏：增删、再收藏、A/B 隔离', async () => {
+  const { db, handle } = fixture();
+  const id = await seedResource(db, null);
+  assert.equal((await call(handle, ctx(`/api/resources/${id}/favorite`, { method: 'POST' }))).status, 401);
+
+  const cookieA = cookiePair(await register(handle, uniqueName()));
+  const cookieB = cookiePair(await register(handle, uniqueName()));
+
+  const fav = await call(handle, ctx(`/api/resources/${id}/favorite`, { method: 'POST', cookie: cookieA }));
+  assert.equal(fav.status, 200);
+  assert.deepEqual(fav.body, { favorited: true });
+
+  const favsA = await call(handle, ctx('/api/favorites', { cookie: cookieA }));
+  assert.equal(favsA.body.total, 1);
+  assert.equal(favsA.body.items[0].id, id);
+  const favsB = await call(handle, ctx('/api/favorites', { cookie: cookieB }));
+  assert.equal(favsB.body.total, 0, 'B 看不到 A 的收藏');
+
+  const detailB = await call(handle, ctx(`/api/resources/${id}`, { cookie: cookieB }));
+  assert.equal(detailB.body.resource.favorited, false);
+
+  // B 取消 A 的收藏：只改自己的记录，A 的收藏不受影响。
+  const unFavB = await call(handle, ctx(`/api/resources/${id}/unfavorite`, { method: 'POST', cookie: cookieB }));
+  assert.equal(unFavB.status, 200);
+  assert.equal((await call(handle, ctx('/api/favorites', { cookie: cookieA }))).body.total, 1);
+
+  const unFavA = await call(handle, ctx(`/api/resources/${id}/unfavorite`, { method: 'POST', cookie: cookieA }));
+  assert.deepEqual(unFavA.body, { favorited: false });
+  assert.equal((await call(handle, ctx('/api/favorites', { cookie: cookieA }))).body.total, 0);
+
+  // 再收藏：撤销标记清除，重新生效。
+  await call(handle, ctx(`/api/resources/${id}/favorite`, { method: 'POST', cookie: cookieA }));
+  assert.equal((await call(handle, ctx('/api/favorites', { cookie: cookieA }))).body.total, 1);
+
+  assert.equal((await call(handle, ctx('/api/resources/00000000-0000-0000-0000-000000000000/favorite', { method: 'POST', cookie: cookieA }))).status, 404);
+});
+
+// ---- 模块7：个人中心测评记录（霍兰德 + MBTI 简化版共存） ----
+
+test('测评记录：登录门槛、只看自己的、两种测评按时间倒序共存', async () => {
+  const { handle } = fixture();
+  assert.equal((await call(handle, ctx('/api/assessments'))).status, 401);
+  assert.equal((await call(handle, ctx('/api/assessments', { method: 'POST', body: {} }))).status, 405);
+  const cookieA = cookiePair(await register(handle, uniqueName()));
+  const cookieB = cookiePair(await register(handle, uniqueName()));
+  assert.equal((await call(handle, ctx('/api/assessments', { cookie: cookieA }))).body.total, 0);
+
+  await submit(handle, cookieA, allAnswers(2));
+  await tick();
+  await mbtiSubmit(handle, cookieA, mbtiAll(0));
+
+  const listA = await call(handle, ctx('/api/assessments', { cookie: cookieA }));
+  assert.equal(listA.body.total, 2);
+  assert.equal(listA.body.items[0].kind, 'mbti');
+  assert.equal(listA.body.items[0].code, 'ESTJ');
+  assert.deepEqual(listA.body.items[0].top_types, ['ESTJ']);
+  assert.equal(listA.body.items[1].kind, 'riasec');
+  assert.deepEqual(listA.body.items[1].scores, { R: 10, I: 10, A: 10, S: 10, E: 10, C: 10 });
+  assert.deepEqual(listA.body.items[1].top_types, ['R', 'I', 'A']);
+  const listB = await call(handle, ctx('/api/assessments', { cookie: cookieB }));
+  assert.equal(listB.body.total, 0, 'B 看不到 A 的测评记录');
+});
+
+// ---- 模块3：首页统计（真实计数，空数据与触顶如实显示） ----
+
+test('首页统计：公开读；未登录个人计数为 null；计数反映真实行数与导入元数据', async () => {
+  const { db, handle } = fixture();
+
+  const anon = await call(handle, ctx('/api/stats'));
+  assert.equal(anon.status, 200);
+  assert.deepEqual(anon.body.stats, {
+    resources_total: 0,
+    resources_capped: false,
+    universities_total: null,
+    favorites_count: null,
+    favorites_capped: false,
+    assessments_count: null,
+    assessments_capped: false,
+  });
+
+  const created = await register(handle, uniqueName());
+  const cookie = cookiePair(created);
+  const userId = created.body.user.id;
+  const mine = await call(handle, ctx('/api/stats', { cookie }));
+  assert.deepEqual(mine.body.stats, {
+    resources_total: 0,
+    resources_capped: false,
+    universities_total: null,
+    favorites_count: 0,
+    favorites_capped: false,
+    assessments_count: 0,
+    assessments_capped: false,
+  });
+
+  // 直接向假数据库写入行，验证计数逻辑（各写入接口在各自测试里覆盖）。
+  await db.from('resources').insertIfAbsent({ id: 'r1', title: '资料一' }, { onConflict: 'id' });
+  await db.from('resources').insertIfAbsent({ id: 'r2', title: '资料二' }, { onConflict: 'id' });
+  await db.from('data_meta').insertIfAbsent({
+    key: 'counts',
+    value: JSON.stringify({ universities: 2400, admission_scores: 11005, enrollment_plans: 183493 }),
+  }, { onConflict: 'key' });
+  await db.from('favorites').insertIfAbsent(
+    { user_id: userId, resource_id: 'r1', created_at: new Date().toISOString(), revoked_at: null },
+    { onConflict: 'user_id,resource_id' },
+  );
+  await db.from('favorites').insertIfAbsent(
+    { user_id: userId, resource_id: 'r2', revoked_at: new Date().toISOString(), created_at: new Date().toISOString() },
+    { onConflict: 'user_id,resource_id' },
+  );
+  await db.from('assessments').insertIfAbsent(
+    { id: 'a1', user_id: userId, kind: 'riasec', answers: '[]', scores: '{}', code: 'RIA', created_at: new Date().toISOString() },
+    { onConflict: 'id' },
+  );
+
+  const counted = await call(handle, ctx('/api/stats', { cookie }));
+  assert.deepEqual(counted.body.stats, {
+    resources_total: 2,
+    resources_capped: false,
+    universities_total: 2400,
+    favorites_count: 1, // 已取消收藏的那条不计入
+    favorites_capped: false,
+    assessments_count: 1,
+    assessments_capped: false,
+  });
+
+  // 别人的收藏不计入自己的统计；错误方法 405。
+  const other = await register(handle, uniqueName());
+  const otherStats = await call(handle, ctx('/api/stats', { cookie: cookiePair(other) }));
+  assert.equal(otherStats.body.stats.favorites_count, 0);
+  assert.equal(otherStats.body.stats.assessments_count, 0);
+  assert.equal((await call(handle, ctx('/api/stats', { method: 'POST', body: {} }))).status, 405);
+});
+
+test('首页统计：计数触顶如实报告 capped，不把截断值当真实总数', async () => {
+  const { db, handle } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const userId = (await me(handle, cookie)).body.user.id;
+  const batch = Array.from({ length: 500 }, (_, i) => ({ id: `r${i}`, title: `资料${i}` }));
+  await db.from('resources').insertIfAbsent(batch, { onConflict: 'id' });
+  const favs = Array.from({ length: 500 }, (_, i) => ({
+    user_id: userId, resource_id: `r${i}`, created_at: new Date().toISOString(), revoked_at: null,
+  }));
+  await db.from('favorites').insertIfAbsent(favs, { onConflict: 'user_id,resource_id' });
+
+  const s = (await call(handle, ctx('/api/stats', { cookie }))).body.stats;
+  assert.equal(s.resources_total, 500);
+  assert.equal(s.resources_capped, true);
+  assert.equal(s.favorites_count, 500);
+  assert.equal(s.favorites_capped, true);
+});

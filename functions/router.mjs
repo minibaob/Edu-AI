@@ -4,41 +4,22 @@
 import { AppError, applicationPath, errorJson, json, readJson, requireTrustedOrigin, rows } from './http.mjs';
 import { canonicalUsername, validatePassword, validateProfile } from './validate.mjs';
 import { hashPassword, verifyPassword, verifyPasswordAgainstDummy } from './passwords.mjs';
-import { SESSION_TTL_MS, clearSessionCookie, createSession, revokeSession, sessionCookie, validateSession } from './sessions.mjs';
+import { SESSION_TTL_MS, SessionRequired, clearSessionCookie, createSession, requireSession, revokeSession, sessionCookie, unauthorized, validateSession } from './sessions.mjs';
 import { consume } from './limiter.mjs';
 import { OPTIONS, QUESTIONS, computeResult, publicResult, validateAnswers } from './assessment.mjs';
 import {
   OPTIONS as MBTI_OPTIONS, QUESTIONS as MBTI_QUESTIONS,
   computeResult as computeMbti, publicResult as mbtiPublicResult, validateAnswers as validateMbtiAnswers,
 } from './mbti.mjs';
-import { importChunk, listUniversities, universityDetail, updateMeta } from './universities.mjs';
+import { importChunk, listUniversities, readMeta, universityDetail, updateMeta } from './universities.mjs';
+import { createResource, favoriteResource, getResource, listFavorites, listResources, unfavoriteResource } from './resources.mjs';
 
 const SESSION_TTL_SECONDS = Math.floor(SESSION_TTL_MS / 1000);
 const encoder = new TextEncoder();
 const USER_COLUMNS = 'id,username,display_name,grade,province,subjects,role,created_at';
 const CREDENTIAL_COLUMNS = 'id,username,password_salt,password_hash,password_iterations';
 
-class SessionRequired extends Error {
-  constructor(state) {
-    super('login_required');
-    this.state = state;
-  }
-}
-
 const retryAfter = (result) => ({ 'retry-after': String(Math.max(1, Math.ceil(result.retryAfterMs / 1000))) });
-
-// Cookie 存在但无效（过期 / 已撤销 / 被篡改）时顺手清掉，避免浏览器一直带着失效凭据。
-function unauthorized(state) {
-  return state === 'invalid'
-    ? errorJson('login_required', 401, { 'set-cookie': clearSessionCookie() })
-    : errorJson('login_required', 401);
-}
-
-async function requireSession(db, request) {
-  const result = await validateSession(db, request);
-  if (result.state !== 'valid') throw new SessionRequired(result.state);
-  return result.session;
-}
 
 // 管理员 = 应用会话 + 数据库 role=admin（由所有者通过平台工具授予）；不使用平台身份。
 async function requireAdmin(db, request) {
@@ -219,6 +200,82 @@ async function latestAssessment(db, session, kind, toPublic) {
   return json({ result: found.length === 1 ? toPublic(found[0]) : null });
 }
 
+// ---- 模块3：首页统计（公开读；个人计数只在登录后返回） ----
+// 适配器无 count 能力：按读取上限 500 行计数，触顶时 capped=true，前端显示「500+」，
+// 不把截断值当真实总数。院校总数用导入元数据里的精确计数。表未迁移或查询失败返回 null。
+const COUNT_LIMIT = 500;
+
+async function countRows(db, table, filters = {}) {
+  try {
+    let query = db.from(table).select('id').limit(COUNT_LIMIT);
+    for (const [key, value] of Object.entries(filters)) query = query.eq(key, value);
+    return rows(await query).length;
+  } catch {
+    return null;
+  }
+}
+
+async function stats(db, request) {
+  const session = await validateSession(db, request);
+  const userId = session.state === 'valid' ? session.session.userId : null;
+  const resourcesTotal = await countRows(db, 'resources');
+  let universitiesTotal = null;
+  try {
+    const counts = await readMeta(db, 'counts');
+    if (counts && typeof counts.universities === 'number') universitiesTotal = counts.universities;
+  } catch {
+    universitiesTotal = null;
+  }
+  let favoritesCount = null;
+  let favoritesCapped = false;
+  let assessmentsCount = null;
+  let assessmentsCapped = false;
+  if (userId) {
+    try {
+      // favorites 是复合主键（无 id 列），只取判定撤销所需的列。
+      const mine = rows(await db.from('favorites').select('resource_id,revoked_at')
+        .eq('user_id', userId).limit(COUNT_LIMIT));
+      favoritesCapped = mine.length === COUNT_LIMIT;
+      favoritesCount = mine.filter((row) => row.revoked_at == null).length;
+    } catch {
+      favoritesCount = null;
+    }
+    assessmentsCount = await countRows(db, 'assessments', { user_id: userId });
+    assessmentsCapped = assessmentsCount === COUNT_LIMIT;
+  }
+  return json({
+    stats: {
+      resources_total: resourcesTotal,
+      resources_capped: resourcesTotal === COUNT_LIMIT,
+      universities_total: universitiesTotal,
+      favorites_count: favoritesCount,
+      favorites_capped: favoritesCapped,
+      assessments_count: assessmentsCount,
+      assessments_capped: assessmentsCapped,
+    },
+  });
+}
+
+// ---- 模块7：个人中心测评记录（霍兰德 + MBTI 简化版，只看自己的） ----
+async function listAssessmentHistory(db, session) {
+  const found = rows(await db.from('assessments').select('id,kind,code,scores,created_at')
+    .eq('user_id', session.userId)
+    .order('created_at', { ascending: false }).limit(50));
+  const items = found.map((row) => {
+    const kind = row.kind ?? 'riasec';
+    const scores = typeof row.scores === 'string' ? JSON.parse(row.scores) : row.scores;
+    return {
+      id: row.id,
+      kind,
+      code: row.code,
+      scores,
+      top_types: kind === 'mbti' ? [row.code] : String(row.code).split(''),
+      created_at: row.created_at,
+    };
+  });
+  return json({ total: items.length, items });
+}
+
 async function route(db, request, origin) {
   requireTrustedOrigin(request, origin);
   const path = applicationPath(request);
@@ -273,6 +330,32 @@ async function route(db, request, origin) {
     return latestAssessment(db, session, 'mbti', mbtiPublicResult);
   }
 
+  // 模块3/4/7：首页统计公开读；资料读公开、写登录；收藏与测评记录登录且只看自己的。
+  if (path === '/api/stats' && request.method === 'GET') return stats(db, request);
+
+  if (path === '/api/resources' && request.method === 'GET') return listResources(db, request);
+  if (path === '/api/resources' && request.method === 'POST') {
+    const session = await requireSession(db, request);
+    return createResource(db, request, session);
+  }
+  if (path === '/api/favorites' && request.method === 'GET') {
+    const session = await requireSession(db, request);
+    return listFavorites(db, request, session);
+  }
+  if (path === '/api/assessments' && request.method === 'GET') {
+    const session = await requireSession(db, request);
+    return listAssessmentHistory(db, session);
+  }
+  const resourceAction = path.match(/^\/api\/resources\/([0-9a-f-]{36})\/(favorite|unfavorite)$/);
+  if (resourceAction && request.method === 'POST') {
+    const session = await requireSession(db, request);
+    return resourceAction[2] === 'favorite'
+      ? favoriteResource(db, request, session, resourceAction[1])
+      : unfavoriteResource(db, request, session, resourceAction[1]);
+  }
+  const resourceDetail = path.match(/^\/api\/resources\/([0-9a-f-]{36})$/);
+  if (resourceDetail && request.method === 'GET') return getResource(db, request, resourceDetail[1]);
+
   // 模块5：匿名只读查询。
   if (path === '/api/universities' && request.method === 'GET') return listUniversities(db);
   const detailMatch = path.match(/^\/api\/universities\/([A-Za-z0-9]{1,32})$/);
@@ -299,7 +382,9 @@ async function route(db, request, origin) {
   if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health',
     '/api/assessment/questions', '/api/assessment/submit', '/api/assessment/latest',
     '/api/mbti/questions', '/api/mbti/submit', '/api/mbti/latest',
-    '/api/universities', '/api/admin/import', '/api/admin/meta'].includes(path)) {
+    '/api/universities', '/api/admin/import', '/api/admin/meta',
+    '/api/stats', '/api/resources', '/api/favorites', '/api/assessments'].includes(path)
+    || /^\/api\/resources\/[0-9a-f-]{36}(\/(favorite|unfavorite))?$/.test(path)) {
     throw new AppError('method_not_allowed', 405);
   }
   throw new AppError('not_found', 404);

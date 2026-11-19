@@ -1,6 +1,6 @@
 // 会话：32 字节随机不透明令牌放在 __Host- Cookie 中；数据库只保存令牌的 SHA-256 摘要、
 // 用户 ID、签发/过期时间与撤销时间。明文令牌从不落库、从不记录。
-import { AppError, rows } from './http.mjs';
+import { AppError, errorJson, rows } from './http.mjs';
 
 export const SESSION_COOKIE = '__Host-app_auth.session';
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -82,4 +82,24 @@ export async function revokeSession(db, digest, now = Date.now()) {
   const revoked = rows(await db.from('sessions').update({ revoked_at: new Date(now).toISOString() })
     .eq('token_digest', digest).select('token_digest'));
   return revoked.length === 1;
+}
+
+export class SessionRequired extends Error {
+  constructor(state) {
+    super('login_required');
+    this.state = state;
+  }
+}
+
+export async function requireSession(db, request) {
+  const result = await validateSession(db, request);
+  if (result.state !== 'valid') throw new SessionRequired(result.state);
+  return result.session;
+}
+
+// Cookie 存在但无效（过期 / 已撤销 / 被篡改）时顺手清掉，避免浏览器一直带着失效凭据。
+export function unauthorized(state) {
+  return state === 'invalid'
+    ? errorJson('login_required', 401, { 'set-cookie': clearSessionCookie() })
+    : errorJson('login_required', 401);
 }
