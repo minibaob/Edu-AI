@@ -136,6 +136,7 @@ export async function saveAssessment(answers: number[]): Promise<AssessmentResul
 }
 
 export async function listAssessments(): Promise<AssessmentResult[]> {
-  const data = await api<{ total: number; items: { id: string; scores: AssessmentScores; top_types: DimensionCode[]; created_at: string }[] }>("/api/assessments");
-  return data.items.map((item) => ({ answers: [], scores: item.scores, top_types: item.top_types, created_at: item.created_at, id: item.id }));
+  const data = await api<{ total: number; items: { id: string; version?: number | null; scores: AssessmentScores; top_types: DimensionCode[]; created_at: string }[] }>("/api/assessments");
+  // 历史接口合并了三种测评；本函数只服务 24 题版，按 version 过滤，避免混入 MBTI/30 题记录。
+  return data.items.filter((item) => item.version === 24).map((item) => ({ answers: [], scores: item.scores, top_types: item.top_types, created_at: item.created_at, id: item.id }));
 }

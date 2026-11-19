@@ -37,6 +37,7 @@ type FavoriteItem = {
 type AssessmentItem = {
   id: string;
   kind: string;
+  version: number | null;
   code: string;
   scores: Record<string, number>;
   top_types: string[];
@@ -62,6 +63,7 @@ export default function ProfilePage() {
   const [newPassword, setNewPassword] = useState("");
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordMsg, setPasswordMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [logoutConfirm, setLogoutConfirm] = useState(false);
 
   // 表单初始值随登录用户变化同步（useEffect），不在渲染期间 setState。
   const [formUserId, setFormUserId] = useState<string | null>(user?.id ?? null);
@@ -198,7 +200,15 @@ export default function ProfilePage() {
             </p>
           </div>
         </div>
-        <Button variant="outline" onClick={handleLogout}>退出登录</Button>
+        {logoutConfirm ? (
+          <div className="flex items-center gap-2" role="group" aria-label="退出登录确认">
+            <span className="text-sm text-muted-foreground">确认退出当前账号？</span>
+            <Button variant="destructive" size="sm" onClick={handleLogout}>确认退出</Button>
+            <Button variant="outline" size="sm" onClick={() => setLogoutConfirm(false)}>取消</Button>
+          </div>
+        ) : (
+          <Button variant="outline" onClick={() => setLogoutConfirm(true)}>退出登录</Button>
+        )}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -328,6 +338,7 @@ export default function ProfilePage() {
               <p>角色：学生</p>
               <p>注册时间：{new Date(user.created_at).toLocaleDateString("zh-CN")}</p>
               <p className="text-xs">我们只保存用户名和你自愿填写的资料，不收集邮箱和手机号。</p>
+              <p className="text-xs">资料只有你自己能看到，仅用于个性化筛选；请不要在昵称或资料里填写真实姓名、手机号、家庭住址等敏感信息。</p>
             </CardContent>
           </Card>
         </div>
@@ -411,7 +422,7 @@ export default function ProfilePage() {
                   <span className="ml-2 font-normal text-muted-foreground">
                     {item.kind === "mbti"
                       ? `性格倾向（简化版）：${item.code}`
-                      : `主要倾向：${item.top_types.map((code) => `${code} · ${DIMENSION_NAMES[code] ?? code}`).join("、")}`}
+                      : `霍兰德（${item.version ?? 30} 题）· 主要倾向：${item.top_types.map((code) => `${code} · ${DIMENSION_NAMES[code] ?? code}`).join("、")}`}
                   </span>
                 </p>
                 <p className="mt-1.5 flex flex-wrap gap-1.5">
