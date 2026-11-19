@@ -119,6 +119,8 @@ node --test dev/check.mjs # 后端契约测试
 - [x] 模块7：个人中心（表单初始值改用 useEffect 同步，不再渲染期间 setState；新增「我的收藏」「我的测评记录」两区，接口 404 时如实显示「尚未上线」；契约测试 13 项通过）。2026-11-19 回归修复：测评历史改读 assessments 表双 kind（MBTI 显示类型码与「票」、霍兰德显示维度与「分」）；首页统计修复收藏复合主键读取（favorites 无 id 列）、院校总数取 counts 元数据（未导入为 null）、计数触顶如实加「+」；本地浏览器实测双 kind 历史与登录后计数正确。
 - [x] 模块8：云端分配、测试、部署上线（站点 https://eduai-o1pbxkl2opq.qoder.zone ，selected 访问；数据库/函数/存储已就绪，线上共 12 表：users/sessions/auth_limiter/assessments/universities/admission_scores/enrollment_plans/data_meta/majors/resources/favorites/assessment_results，assessments 含 kind 列区分霍兰德/MBTI。2026-11-19 统一发布 actionId e5f6a7b8-c9d0-4e1f-9a2b-3c4d5e6f7a8b（publishOperationId 01a1f37a-e2b0-7de6-bd8b-b5a779a51d1e，succeeded/committed）：含模块4 文件直传、河北数据与多省元数据合并、模块3/7 回归修复。河北命令行导入期间经所有者授权临时公开访问，导入完成后已恢复 selected（targets 与原策略一致为空）。注意：站点地址在设置中改过，functions/http.mjs 的 PUBLIC_ORIGIN 必须与当前地址一致，否则写请求被 CSRF 校验拒绝。）
 
+- [x] 阶段5：资料库补全（2026-11-19，提交 5dcde19，分支 feature/resource-inline-viewer，含此前的在线预览与三角函数 PDF）：①上传状态——文件 PUT 改 XHR 真实进度，登记卡显示签发/上传百分比/服务端校验三阶段；②内容管理（最小范围）——resources 加可空 deleted_at 软删除列（迁移 phase5-resources-deleted-at-v1 已应用），DELETE /api/resources/:id 仅上传者或 admin，列表/详情/下载/收藏/首页统计全链路过滤已删除行并清理存储对象，详情页两步确认删除，管理员页新增资料管理区（逐页取全、两步确认下架）。教材版本无真实数据支持，按规格不显示。契约测试共 45 项通过；本地浏览器实测上传三阶段/所有者删除/管理员下架全流程通过（期间修复管理区 limit=500 超接口单页上限 100 的问题）。已发布 actionId e5f6a7b8-9c0d-4e1f-8a2b-3c4d5e6f7a81（publishOperationId 01a1f452-4585-7cc7-b2e0-3f1317cd476a，succeeded/committed，published=true，selected 访问不变）；线上真实浏览器验收待所有者进行。注意：该分支尚未合并进 main，从其他分支发布前必须先合并，否则会回退在线预览与阶段5功能。
+
 ### 运行时验收表（2026-11-18，目标：含模块6 MBTI 扩展的发布版本）
 
 | 层 | 检查 | 状态 | 证据 / 阻塞 |
