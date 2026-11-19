@@ -1,17 +1,17 @@
-// 模块6 兴趣测评与职业探索：介绍 → 逐题作答（24 道，5 级量表）→ 结果。
-// 霍兰德 RIASEC 简化版，固定规则计分，不调用 AI；结果仅供兴趣探索参考，
-// 不是心理诊断，不能绝对决定学生未来职业。登录后结果保存到账号，未登录时
-// 保存在本机浏览器。
 import { useState } from "react";
-import { ArrowLeft, ArrowRight, Compass, RotateCcw } from "lucide-react";
+import { ArrowLeft, Brain, Compass, Sparkles } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useAuth } from "@/src/lib/auth";
+import { Link } from "@/src/lib/router";
+import MbtiAssessment from "@/src/pages/assessment-mbti";
+import RiasecAssessment30 from "@/src/pages/assessment-riasec";
+import { ArrowRight, RotateCcw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Label } from "@/components/ui/label";
-import { useAuth } from "@/src/lib/auth";
 import { errorMessage } from "@/src/lib/api";
 import {
   DIMENSIONS,
@@ -27,9 +27,113 @@ import type { AssessmentResult, DimensionCode } from "@/src/lib/assessment";
 import { cn } from "@/lib/utils";
 
 const DISCLAIMER =
-  "兴趣测评仅用于自我探索，结果不代表能力高低，也不构成职业或升学的确定性判断；它不是心理诊断，不能代替专业升学指导。";
+  "三个测评都仅用于兴趣与自我探索参考，不是心理诊断，也不能绝对决定你的未来专业或职业方向。倾向会随学习和经历而变化，结果请当作认识自己的起点，而不是标签。";
 
 export default function AssessmentPage() {
+  const { user, loading } = useAuth();
+  const [kind, setKind] = useState<"riasec24" | "riasec30" | "mbti" | null>(null);
+
+  if (loading) {
+    return <p className="py-16 text-center text-sm text-muted-foreground">正在加载测评…</p>;
+  }
+
+  if (!user) {
+    return (
+      <div className="mx-auto flex max-w-2xl flex-col gap-4">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Compass className="size-5" aria-hidden />兴趣测评与职业探索</CardTitle>
+            <CardDescription>霍兰德兴趣测评（24 题 / 30 题两个版本）+ MBTI 风格性格倾向测评（简化版），全部固定规则计分，不调用任何 AI 模型。</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <p className="text-sm text-muted-foreground">
+              登录后即可作答：霍兰德兴趣测评有两个版本（24 题或 30 题，任选一个），帮你发现兴趣倾向与可探索的专业、职业方向；
+              MBTI 风格性格倾向测评（28 题，自研简化版，非官方 MBTI）帮你了解自己的性格偏好。
+              测评结果保存在你的账号中，可随时重新测评。
+            </p>
+            <Alert><AlertDescription>{DISCLAIMER}</AlertDescription></Alert>
+            <Button asChild className="edu-gradient text-white"><Link to="/login">登录后开始测评</Link></Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (kind === "riasec24") {
+    return (
+      <div className="flex flex-col gap-4">
+        <div>
+          <Button variant="ghost" size="sm" onClick={() => setKind(null)}>
+            <ArrowLeft className="size-4" aria-hidden /> 返回测评选择
+          </Button>
+        </div>
+        <RiasecQuiz />
+      </div>
+    );
+  }
+  if (kind === "riasec30") return <RiasecAssessment30 onBack={() => setKind(null)} />;
+  if (kind === "mbti") return <MbtiAssessment onBack={() => setKind(null)} />;
+
+  return (
+    <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      <div>
+        <h1 className="flex items-center gap-2 text-xl font-semibold"><Compass className="size-5" aria-hidden />兴趣测评与职业探索</h1>
+        <p className="mt-1 text-sm text-muted-foreground">选择一个测评开始，三个测评相互独立，结果分别保存在你的账号中。</p>
+      </div>
+      <Alert><AlertDescription>{DISCLAIMER}</AlertDescription></Alert>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <Card className="flex flex-col">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base"><Sparkles className="size-5" aria-hidden />霍兰德兴趣测评（24 题）</CardTitle>
+            <CardDescription>RIASEC 简化版 · 24 题 · 约 5 分钟</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-1 flex-col gap-4">
+            <p className="flex-1 text-sm text-muted-foreground">
+              用 24 道活动偏好题、每题按符合程度打分（5 级量表），估计你在现实、研究、艺术、社会、企业、常规六个维度上的兴趣倾向，
+              给出兴趣代码与可探索的专业类、职业方向。
+            </p>
+            <Button onClick={() => setKind("riasec24")} className="edu-gradient text-white">进入 24 题版</Button>
+          </CardContent>
+        </Card>
+        <Card className="flex flex-col">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base"><Sparkles className="size-5" aria-hidden />霍兰德兴趣测评（30 题）</CardTitle>
+            <CardDescription>RIASEC 简化版 · 30 题 · 约 5 分钟</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-1 flex-col gap-4">
+            <p className="flex-1 text-sm text-muted-foreground">
+              用 30 道活动偏好题、每题按喜欢程度三档选择（不喜欢 / 一般 / 喜欢），估计你在现实、研究、艺术、社会、企业、常规六个维度上的兴趣倾向，
+              给出兴趣代码与可探索的专业类、职业方向。
+            </p>
+            <Button onClick={() => setKind("riasec30")} className="edu-gradient text-white">进入 30 题版</Button>
+          </CardContent>
+        </Card>
+        <Card className="flex flex-col">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base"><Brain className="size-5" aria-hidden />MBTI 风格性格倾向（简化版）</CardTitle>
+            <CardDescription>自研简化题目 · 28 题 · 约 5 分钟 · 非官方 MBTI</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-1 flex-col gap-4">
+            <p className="flex-1 text-sm text-muted-foreground">
+              从能量来源、信息获取、决策方式、生活节奏四个维度了解你的性格偏好，
+              得到一个四字母类型与成长建议，仅供自我探索参考。
+            </p>
+            <Button onClick={() => setKind("mbti")} className="edu-gradient text-white">进入性格测评</Button>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ---- 霍兰德兴趣测评（24 道，5 级量表）：介绍 → 逐题作答 → 结果 ----
+// 固定规则计分，不调用 AI；结果仅供兴趣探索参考，不是心理诊断。登录后结果保存
+// 到账号，未登录时保存在本机浏览器。题目顺序与后端 functions/assessment.mjs 的
+// QUESTION_DIMENSIONS 严格一致，契约测试会校验防漂移。
+const RIASEC_DISCLAIMER =
+  "兴趣测评仅用于自我探索，结果不代表能力高低，也不构成职业或升学的确定性判断；它不是心理诊断，不能代替专业升学指导。";
+
+function RiasecQuiz() {
   const { user } = useAuth();
   const [step, setStep] = useState<"intro" | "quiz" | "result">("intro");
   const [index, setIndex] = useState(0);
@@ -112,7 +216,7 @@ export default function AssessmentPage() {
               ))}
             </div>
             <Alert>
-              <AlertDescription>{DISCLAIMER}</AlertDescription>
+              <AlertDescription>{RIASEC_DISCLAIMER}</AlertDescription>
             </Alert>
             <div className="flex flex-wrap gap-2">
               <Button className="edu-gradient text-white" onClick={() => setStep("quiz")}>
@@ -215,7 +319,7 @@ export default function AssessmentPage() {
           </Card>
         ))}
         <Alert>
-          <AlertDescription>{DISCLAIMER}</AlertDescription>
+          <AlertDescription>{RIASEC_DISCLAIMER}</AlertDescription>
         </Alert>
         <div className="flex flex-wrap gap-2">
           <Button onClick={retake}>
@@ -279,7 +383,7 @@ export default function AssessmentPage() {
           </Button>
         )}
       </div>
-      <p className="text-center text-xs text-muted-foreground">{DISCLAIMER}</p>
+      <p className="text-center text-xs text-muted-foreground">{RIASEC_DISCLAIMER}</p>
     </div>
   );
 }

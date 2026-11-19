@@ -114,18 +114,32 @@ node --test dev/check.mjs # 后端契约测试
 - [x] 模块2：用户系统（后端注册/登录/退出/会话/资料/改密 + 前端登录注册页/个人中心/导航栏登录状态；契约测试 13 项通过；真实浏览器登录流程待部署后验证）
 - [x] 模块3：首页接入真实数据（统计数字来自 GET /api/stats 真实计数，空数据如实显示「暂无数据」；今日任务保存在本机浏览器，可添加/删除；个性化推荐仍为演示内容，保留「演示数据」标签；契约测试 14 项通过）
 - [x] 模块4：学习资料库（浏览/搜索/筛选/详情/收藏/登记来源链接型资料；契约测试 17 项通过。新表 resources/favorites 待平台审核迁移后应用；文件直传待平台 Storage 适配器在 Function 内接通后开启，当前只接受来源链接型登记）
-- [x] 模块5：高校与录取数据查询 + 官方数据导入工具（后端公开读接口 /api/universities、/api/universities/:code、/api/majors，前端列表/详情/专业目录，空字段显示「暂无数据」；导入工具 db/import/to-sql.mjs；契约测试 17 项通过。新表 universities/majors/admission_scores/enrollment_plans 待平台审核迁移后应用，真实数据待官方渠道整理导入；上线前真实浏览器验证待做）
-- [x] 模块6：兴趣测评（24 道 5 级量表，固定 RIASEC 规则评分，不调用 AI；登录后保存到账号，未登录保存本机；契约测试 16 项通过。新表 assessment_results 待平台审核迁移后应用；题目与专业映射为今晚拟定，需用户确认后用于演示）与职业探索
+- [x] 模块5：高校与录取数据查询 + 官方数据导入工具（后端公开读接口 /api/universities、/api/universities/:code、/api/majors，前端列表/详情/专业目录，空字段显示「暂无数据」；导入工具 db/import/to-sql.mjs；契约测试 17 项通过。新表 universities/majors/admission_scores/enrollment_plans 待平台审核迁移后应用，真实数据待官方渠道整理导入；上线前真实浏览器验证待做。**河南部分已完成，河北待官方数据**：用户提供河南省阳光高考信息平台官方《河南.xlsx》，经 dev/convert-henan.mjs 原样转换为模板 CSV——院校 2400 所、2025 录取 11005 条、2024–2026 招生计划 183493 条，未编造/修改任何数据；艺术体育类综合分保留小数（min_score 为 text），缺失字段一律「暂无数据」。新增 universities/admission_scores/enrollment_plans/data_meta 四表（迁移已应用）；录取用国标代码、计划用河南报考代码，两表按**学校名称**关联；后端 functions/universities.mjs + import-validate.mjs：匿名查询 /api/universities 与 /api/universities/:code?year=，管理员导入 /api/admin/import（500 行/块、2MB 上限、内容哈希 run_id + 确定性主键幂等、数组写入失败逐行回退）与 /api/admin/meta（索引/筛选面/计数）；前端高校查询列表（搜索/分页/计数）+ 详情（年份/科类/批次筛选、计划年份切换、来源标注）+ 管理员数据导入页（①院校②录取③计划顺序、断点续传）。契约测试共 27 项通过；本地浏览器实测 19.7 万行真实数据灌入、列表/详情/筛选/管理员登录/浏览器上传幂等全部通过。**线上数据库为空，待所有者注册应用账号→提升 admin→在 #/admin/import 依次上传 db/import/filled/henan/ 三个 CSV**）
+- [x] 模块6：兴趣测评（24 道 5 级量表，固定 RIASEC 规则评分，不调用 AI；登录后保存到账号，未登录保存本机；契约测试 16 项通过。新表 assessment_results 待平台审核迁移后应用；题目与专业映射为今晚拟定，需用户确认后用于演示）与职业探索。**扩展：MBTI 风格性格倾向测评简化版**——自研 28 题二选一、四维 E/I·S/N·T/F·J/P 每维 7 票计票、16 型固定文案，非官方 MBTI 且页面标注；后端 functions/mbti.mjs 单一计分源，/api/mbti/questions|submit|latest 沿用登录门槛与会话归属；assessments 表加可空 kind 列区分 riasec/mbti（平台受限 DDL 不允许新增列带默认值，旧行已回填 riasec）；前端测评页双入口，两种测评独立保存互不干扰；契约测试共 19 项通过；本地浏览器实测 MBTI 全选A→ESTJ、重测全选B→INFP、刷新持久化、霍兰德 ACI 不受影响、未登录引导全部通过；kind 列迁移已应用，已随新版本发布。**合并注意（2026-11-19）：霍兰德 24 题 5 级量表版（用户 2026-11-19 上午逐题审过并要求 4 处逻辑修正）与河南分支的 30 题三档版并存，用户在测评页三入口中任选；30 题版后端为 functions/assessment30.mjs（路由 /api/assessment/*），结果写入 assessments 表（kind='riasec'）；MBTI 扩展完整保留。**
 - [x] 模块7：个人中心（表单初始值改用 useEffect 同步，不再渲染期间 setState；新增「我的收藏」「我的测评记录」两区，接口 404 时如实显示「尚未上线」；契约测试 13 项通过）
-- [x] 模块8：云端分配、测试、部署上线（站点 https://eduai-o1pbxkl2opq.qoder.zone ，selected 访问；数据库/函数/存储已就绪，users/sessions/auth_limiter 三表已应用，完整版本已发布。注意：站点地址在设置中改过，functions/http.mjs 的 PUBLIC_ORIGIN 必须与当前地址一致，否则写请求被 CSRF 校验拒绝）
+- [x] 模块8：云端分配、测试、部署上线（站点 https://eduai-o1pbxkl2opq.qoder.zone ，selected 访问；数据库/函数/存储已就绪，users/sessions/auth_limiter/assessments/universities/admission_scores/enrollment_plans/data_meta 八表已应用，assessments 含 kind 列区分霍兰德/MBTI，含模块6及 MBTI 扩展的最新版本已发布。注意：站点地址在设置中改过，functions/http.mjs 的 PUBLIC_ORIGIN 必须与当前地址一致，否则写请求被 CSRF 校验拒绝。**合并后待办：main 新增的 majors/resources/favorites/assessment_results 四表尚未应用，需按外键顺序重新核对迁移顺序后再提交；线上已发布的仍是河南分支版本。**）
 
-### 运行时验收表（2026-11-18，目标：首个完整发布版本）
+### 运行时验收表（2026-11-18，目标：含模块6 MBTI 扩展的发布版本）
 
 | 层 | 检查 | 状态 | 证据 / 阻塞 |
 | --- | --- | --- | --- |
-| 本地 | 构建 + 13 项认证契约测试 | passed | `node --test dev/check.mjs` 全部通过 |
-| 控制面 | 后端分配、迁移应用、发布提交 | passed | function_backend 就绪；三表已验证；发布操作 succeeded/committed |
-| 浏览器 | 注册/登录/会话恢复/退出真实流程 | pending | 站点私有，需所有者在已登录 Qoder 的浏览器中验证（平台登录与应用登录是两步） |
-| 隔离 | A/B 账号隔离、未授权访问 | pending | 本地契约测试已覆盖逻辑隔离；线上验证待浏览器准入后进行 |
+| 本地 | 构建 + 19 项契约测试（认证 13 + 霍兰德 3 + MBTI 3） | passed | `node --test dev/check.mjs` 全部通过 |
+| 本地浏览器 | 霍兰德与 MBTI 全流程（双入口/答题/结果/重测/刷新持久化/互不干扰/未登录引导） | passed | 本地 fixture（dev/server-local.mjs + 假数据库）实测；MBTI 全选A→ESTJ、全选B→INFP，霍兰德 ACI，均与固定规则复核一致 |
+| 控制面 | kind 列迁移应用、旧行回填、发布提交 | passed | 迁移操作 succeeded；旧测评行已回填 riasec（affected_rows=1）；发布操作 succeeded/committed，published=true |
+| 线上浏览器 | 注册/登录/测评真实流程 | pending | 站点 selected 访问，需所有者在已登录 Qoder 的浏览器中验证（平台登录与应用登录是两步）；匿名探测返回 401 sites_gateway_login_required 属预期 |
+| 隔离 | A/B 账号隔离、未授权访问 | passed（本地）/ pending（线上） | 契约测试覆盖归属与隔离；线上验证待浏览器准入后进行 |
 
 注：私有网关拦截匿名请求（401 sites_gateway_login_required）属预期行为；改为公开访问需所有者单独授权。
+
+### 运行时验收表（2026-11-19，目标：模块5 河南部分的发布版本）
+
+| 层 | 检查 | 状态 | 证据 / 阻塞 |
+| --- | --- | --- | --- |
+| 数据转换 | 官方 河南.xlsx → 模板 CSV（不编造/不修改） | passed | dev/convert-henan.mjs；validate.mjs 0 错误；艺术/体育综合分小数保留；计划同键多行（办学地点不同）保留并警告 |
+| 本地 | 构建 + 27 项契约测试（认证 13 + 霍兰德 3 + MBTI 3 + 模块5 8） | passed | `npm run build`、`node --test dev/check.mjs` 全部通过 |
+| 本地浏览器 | 19.7 万行真实数据经真实导入路由灌入；列表 2400 所/80 页/计数；清华详情 700/108、687/12、暂无数据、计划按名称关联+年份切换；科类筛选；管理员登录→数据导入页；浏览器上传 universities.csv 5 块幂等（写入 0 行） | passed | dev/server-local.mjs + EDUAI_SEED_DIR 实测 |
+| 控制面 | universities/admission_scores/enrollment_plans/data_meta 迁移应用 | passed | clientMigrationId module5-henan-tables-v1，操作 succeeded |
+| 线上 | 发布含模块5 的版本 | passed | 发布操作 succeeded/committed，published=true（actionId 7c9e1f3a-5b2d-4a8e-9c1f-2e3d4a5b6c7d） |
+| 线上数据 | 所有者导入三个 CSV 后线上查询验证 | pending | 线上数据库为空；selected 访问需所有者浏览器登录；导入顺序 ①院校②录取③计划 |
+
+注：应用内预览面板的 fetch 不携带平台登录态，网关返回 401 sites_gateway_login_required（网关层拦截不进函数日志），属预期；线上验收必须在已登录 Qoder 的浏览器中进行。前端已对该错误码显示明确引导文案。

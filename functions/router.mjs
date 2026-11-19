@@ -3,9 +3,18 @@
 // 绝不使用 ctx.user、平台身份、Host 头或浏览器提交的 owner_id。
 import { AppError, applicationPath, errorJson, json, readJson, requireTrustedOrigin, rows } from './http.mjs';
 import { canonicalUsername, validatePassword, validateProfile } from './validate.mjs';
-import { isUuid, parseListQuery, parseMajorQuery, parseUniversityQuery, validateResourceInput, validateUniversityCode } from './validate.mjs';
+import { isUuid, parseListQuery, parseMajorQuery, validateResourceInput } from './validate.mjs';
 import { GRADES, RESOURCE_TYPES, SUBJECTS } from './validate.mjs';
 import { scoreAssessment, validateAnswers } from './assessment.mjs';
+import {
+  OPTIONS as RIASEC30_OPTIONS, QUESTIONS as RIASEC30_QUESTIONS,
+  computeResult as computeRiasec30, publicResult as riasec30PublicResult, validateAnswers as validateRiasec30Answers,
+} from './assessment30.mjs';
+import {
+  OPTIONS as MBTI_OPTIONS, QUESTIONS as MBTI_QUESTIONS,
+  computeResult as computeMbti, publicResult as mbtiPublicResult, validateAnswers as validateMbtiAnswers,
+} from './mbti.mjs';
+import { importChunk, listUniversities as listUniversitiesIndex, universityDetail as fetchUniversityDetail, updateMeta } from './universities.mjs';
 import { hashPassword, verifyPassword, verifyPasswordAgainstDummy } from './passwords.mjs';
 import { SESSION_TTL_MS, clearSessionCookie, createSession, revokeSession, sessionCookie, validateSession } from './sessions.mjs';
 import { consume } from './limiter.mjs';
@@ -215,38 +224,55 @@ async function changePassword(db, request, session) {
   return json({ ok: true });
 }
 
-// ---- 模块5：高校与录取数据（公开读接口，无需登录） ----
-// 数据层适配器只提供等值筛选：先按可等值条件取数（上限 500 行），再在内存中做
-// 关键词/枚举筛选与分页。首期数据量小（试点两省），该做法够用；数据量上千后
-// 应改由数据库端筛选（见改进建议）。空字段一律返回 null，前端显示「暂无数据」。
+// 管理员 = 应用会话 + 数据库 role=admin（由所有者通过平台工具授予）；不使用平台身份。
+async function requireAdmin(db, request) {
+  const session = await requireSession(db, request);
+  const user = await loadUser(db, session.userId);
+  if (user.role !== 'admin') throw new AppError('admin_required', 403);
+  return session;
+}
+
+async function submitAssessment(db, request, session, kind, validate, compute, toPublic) {
+  const body = await readJson(request);
+  const answers = validate(body);
+  const { scores, code } = compute(answers);
+  const id = crypto.randomUUID();
+  let created;
+  try {
+    created = rows(await db.from('assessments').insertIfAbsent({
+      id,
+      user_id: session.userId,
+      kind,
+      answers: JSON.stringify(answers),
+      scores: JSON.stringify(scores),
+      code,
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'id' }).select('id,kind,code,scores,created_at'));
+  } catch (error) {
+    // 数据层明确拒绝保留 database_unavailable；响应丢失等未知结果不重放、不谎报成功。
+    if (error instanceof AppError) throw error;
+    return errorJson('assessment_unconfirmed', 503);
+  }
+  if (created.length !== 1) return errorJson('assessment_unconfirmed', 503);
+  return json({ result: toPublic(created[0]) }, 201);
+}
+
+async function latestAssessment(db, session, kind, toPublic) {
+  const found = rows(await db.from('assessments').select('id,kind,code,scores,created_at')
+    .eq('user_id', session.userId).eq('kind', kind)
+    .order('created_at', { ascending: false }).limit(1));
+  return json({ result: found.length === 1 ? toPublic(found[0]) : null });
+}
+
+
+// ---- 模块5：高校与录取数据 ----
+// 查询与导入实现在 functions/universities.mjs（河南真实数据：院校索引存 data_meta，
+// 详情按学校名称关联招生计划，管理员分块导入）；此处只保留专业目录（/api/majors）。
 const READ_LIMIT = 500;
-const UNIVERSITY_COLUMNS = 'code,name,province,city,type,level,tags,admission_url,source,note';
 const MAJOR_COLUMNS = 'code,name,category,years,degree,source,note';
-const SCORE_COLUMNS = 'id,university_code,province,year,category,batch,subject_requirement,min_score,min_rank,admitted_count,source,note';
-const PLAN_COLUMNS = 'id,university_code,province,year,major_code,major_name,batch,subject_requirement,plan_count,tuition,source,note';
 
 async function fetchAll(db, table, columns) {
   return rows(await db.from(table).select(columns).limit(READ_LIMIT));
-}
-
-function splitTags(value) {
-  if (typeof value !== 'string' || value === '') return [];
-  return value.split('|').map((t) => t.trim()).filter(Boolean);
-}
-
-function publicUniversity(row) {
-  return {
-    code: row.code,
-    name: row.name,
-    province: row.province,
-    city: row.city ?? null,
-    type: row.type,
-    level: row.level,
-    tags: splitTags(row.tags),
-    admission_url: row.admission_url ?? null,
-    source: row.source,
-    note: row.note ?? null,
-  };
 }
 
 function publicMajor(row) {
@@ -259,55 +285,6 @@ function publicMajor(row) {
     source: row.source,
     note: row.note ?? null,
   };
-}
-
-function byYearDesc(a, b) {
-  return (b.year - a.year) || String(a.province).localeCompare(String(b.province), 'zh')
-    || String(a.category ?? a.major_name ?? '').localeCompare(String(b.category ?? b.major_name ?? ''), 'zh')
-    || String(a.batch ?? '').localeCompare(String(b.batch ?? ''), 'zh');
-}
-
-async function listUniversities(db, request) {
-  const query = parseUniversityQuery(new URL(request.url).search);
-  const all = await fetchAll(db, 'universities', UNIVERSITY_COLUMNS);
-  const needle = query.q.toLowerCase();
-  const filtered = all.filter((row) => {
-    if (query.province && row.province !== query.province) return false;
-    if (query.type && row.type !== query.type) return false;
-    if (query.level && row.level !== query.level) return false;
-    if (query.tag && !splitTags(row.tags).includes(query.tag)) return false;
-    if (needle && !(String(row.name).toLowerCase().includes(needle) || String(row.code).toLowerCase().includes(needle))) return false;
-    return true;
-  });
-  filtered.sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
-  const total = filtered.length;
-  const items = filtered.slice(query.offset, query.offset + query.limit).map(publicUniversity);
-  return json({ total, items });
-}
-
-async function getUniversity(db, code) {
-  validateUniversityCode(code);
-  const found = rows(await db.from('universities').select(UNIVERSITY_COLUMNS).eq('code', code).limit(1));
-  if (found.length !== 1) throw new AppError('not_found', 404);
-  const scores = (await fetchAll(db, 'admission_scores', SCORE_COLUMNS))
-    .filter((row) => row.university_code === code)
-    .sort(byYearDesc)
-    .map((row) => ({
-      id: row.id, province: row.province, year: row.year, category: row.category,
-      batch: row.batch, subject_requirement: row.subject_requirement ?? null,
-      min_score: row.min_score ?? null, min_rank: row.min_rank ?? null,
-      admitted_count: row.admitted_count ?? null, source: row.source, note: row.note ?? null,
-    }));
-  const plans = (await fetchAll(db, 'enrollment_plans', PLAN_COLUMNS))
-    .filter((row) => row.university_code === code)
-    .sort(byYearDesc)
-    .map((row) => ({
-      id: row.id, province: row.province, year: row.year, major_code: row.major_code ?? null,
-      major_name: row.major_name, batch: row.batch ?? null,
-      subject_requirement: row.subject_requirement ?? null, plan_count: row.plan_count ?? null,
-      tuition: row.tuition ?? null, source: row.source, note: row.note ?? null,
-    }));
-  return json({ university: publicUniversity(found[0]), scores, plans });
 }
 
 async function listMajors(db, request) {
@@ -524,9 +501,18 @@ async function route(db, request, origin) {
     return changePassword(db, request, session);
   }
 
-  if (path === '/api/universities' && request.method === 'GET') return listUniversities(db, request);
-  const universityDetail = path.match(/^\/api\/universities\/([0-9A-Za-z]{1,10})$/);
-  if (universityDetail && request.method === 'GET') return getUniversity(db, universityDetail[1]);
+  // 模块5：匿名只读查询（院校索引存 data_meta，前端做搜索/分页；详情按学校名称关联计划）。
+  if (path === '/api/universities' && request.method === 'GET') return listUniversitiesIndex(db);
+  const universityDetail = path.match(/^\/api\/universities\/([A-Za-z0-9]{1,32})$/);
+  if (universityDetail && request.method === 'GET') {
+    const yearParam = new URL(request.url).searchParams.get('year');
+    let planYear = null;
+    if (yearParam !== null) {
+      if (!/^\d{4}$/.test(yearParam)) throw new AppError('invalid_input', 400);
+      planYear = Number(yearParam);
+    }
+    return fetchUniversityDetail(db, universityDetail[1], planYear);
+  }
   if (path === '/api/majors' && request.method === 'GET') return listMajors(db, request);
   if (path === '/api/resources' && request.method === 'GET') return listResources(db, request);
   if (path === '/api/resources' && request.method === 'POST') {
@@ -555,8 +541,42 @@ async function route(db, request, origin) {
     const session = await requireSession(db, request);
     return saveAssessment(db, request, session);
   }
+  if (path === '/api/assessment/questions' && request.method === 'GET') {
+    await requireSession(db, request);
+    return json({ questions: RIASEC30_QUESTIONS.map(({ id, text }) => ({ id, text })), options: RIASEC30_OPTIONS });
+  }
+  if (path === '/api/assessment/submit' && request.method === 'POST') {
+    const session = await requireSession(db, request);
+    return submitAssessment(db, request, session, 'riasec', validateRiasec30Answers, computeRiasec30, riasec30PublicResult);
+  }
+  if (path === '/api/assessment/latest' && request.method === 'GET') {
+    const session = await requireSession(db, request);
+    return latestAssessment(db, session, 'riasec', riasec30PublicResult);
+  }
+  if (path === '/api/mbti/questions' && request.method === 'GET') {
+    await requireSession(db, request);
+    return json({ questions: MBTI_QUESTIONS.map(({ id, text, a, b }) => ({ id, text, a, b })), options: MBTI_OPTIONS });
+  }
+  if (path === '/api/mbti/submit' && request.method === 'POST') {
+    const session = await requireSession(db, request);
+    return submitAssessment(db, request, session, 'mbti', validateMbtiAnswers, computeMbti, mbtiPublicResult);
+  }
+  if (path === '/api/mbti/latest' && request.method === 'GET') {
+    const session = await requireSession(db, request);
+    return latestAssessment(db, session, 'mbti', mbtiPublicResult);
+  }
 
-  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health', '/api/universities', '/api/majors', '/api/resources', '/api/favorites', '/api/assessments', '/api/stats'].includes(path)
+  // 模块5：管理员导入（应用会话 role=admin）。
+  if (path === '/api/admin/import' && request.method === 'POST') {
+    await requireAdmin(db, request);
+    return importChunk(db, request);
+  }
+  if (path === '/api/admin/meta' && request.method === 'POST') {
+    await requireAdmin(db, request);
+    return updateMeta(db, request);
+  }
+
+  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health', '/api/universities', '/api/majors', '/api/resources', '/api/favorites', '/api/assessments', '/api/stats', '/api/assessment/questions', '/api/assessment/submit', '/api/assessment/latest', '/api/mbti/questions', '/api/mbti/submit', '/api/mbti/latest', '/api/admin/import', '/api/admin/meta'].includes(path)
     || universityDetail || resourceDetail || favoriteMatch) {
     throw new AppError('method_not_allowed', 405);
   }

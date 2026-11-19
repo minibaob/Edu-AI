@@ -326,97 +326,6 @@ test('响应头与路由：no-store、未知路径、错误方法', async () => 
   assert.equal((await call(handle, ctx('/api/login', { method: 'POST' }))).status, 400);
 });
 
-// ---- 模块5：高校与录取数据（公开读） ----
-// 种子数据只存在于测试用的假数据库中，不进入生产库；分数/位次为测试值。
-
-async function seedUniversities(db) {
-  const now = new Date().toISOString();
-  await db.from('universities').insertIfAbsent({
-    code: '90001', name: '测试大学A', province: '河北', city: '测试市', type: '综合', level: '本科',
-    tags: '公办|双一流', admission_url: 'https://example-a.edu.cn', source: '测试来源', note: null, created_at: now,
-  }, { onConflict: 'code' });
-  await db.from('universities').insertIfAbsent({
-    code: '90002', name: '测试大学B', province: '河南', city: null, type: '理工', level: '本科',
-    tags: '民办', admission_url: null, source: '测试来源', note: null, created_at: now,
-  }, { onConflict: 'code' });
-  await db.from('admission_scores').insertIfAbsent({
-    id: crypto.randomUUID(), university_code: '90001', province: '河北', year: 2025, category: '物理类',
-    batch: '本科批', subject_requirement: '物理+化学', min_score: 600, min_rank: 12345, admitted_count: 30,
-    source: '测试来源', note: null, created_at: now,
-  }, { onConflict: 'id' });
-  await db.from('admission_scores').insertIfAbsent({
-    id: crypto.randomUUID(), university_code: '90001', province: '河北', year: 2024, category: '历史类',
-    batch: '本科批', subject_requirement: null, min_score: null, min_rank: null, admitted_count: null,
-    source: '测试来源', note: null, created_at: now,
-  }, { onConflict: 'id' });
-  await db.from('enrollment_plans').insertIfAbsent({
-    id: crypto.randomUUID(), university_code: '90001', province: '河北', year: 2025, major_code: null,
-    major_name: '测试专业', batch: '本科批', subject_requirement: null, plan_count: 10, tuition: 5000,
-    source: '测试来源', note: null, created_at: now,
-  }, { onConflict: 'id' });
-}
-
-test('高校列表：空库、关键词、枚举筛选与分页', async () => {
-  const { handle } = fixture();
-  const empty = await call(handle, ctx('/api/universities'));
-  assert.equal(empty.status, 200);
-  assert.deepEqual(empty.body, { total: 0, items: [] });
-
-  const { db, handle: h2 } = fixture();
-  await seedUniversities(db);
-  const all = await call(h2, ctx('/api/universities'));
-  assert.equal(all.body.total, 2);
-  assert.equal(all.body.items[0].name, '测试大学A');
-  assert.deepEqual(all.body.items[0].tags, ['公办', '双一流']);
-
-  const byQ = await call(h2, ctx('/api/universities?q=%E5%A4%A7%E5%AD%A6B'));
-  assert.equal(byQ.body.total, 1);
-  assert.equal(byQ.body.items[0].code, '90002');
-
-  const byProvince = await call(h2, ctx('/api/universities?province=%E6%B2%B3%E5%8D%97'));
-  assert.equal(byProvince.body.total, 1);
-  const byType = await call(h2, ctx('/api/universities?type=%E7%90%86%E5%B7%A5'));
-  assert.equal(byType.body.total, 1);
-  const byTag = await call(h2, ctx('/api/universities?tag=%E5%8F%8C%E4%B8%80%E6%B5%81'));
-  assert.equal(byTag.body.total, 1);
-
-  const page = await call(h2, ctx('/api/universities?limit=1&offset=1'));
-  assert.equal(page.body.total, 2);
-  assert.equal(page.body.items.length, 1);
-  assert.equal(page.body.items[0].code, '90002');
-});
-
-test('高校列表：非法筛选参数返回 400', async () => {
-  const { handle } = fixture();
-  for (const query of ['limit=0', 'limit=101', 'limit=abc', 'offset=-1', 'province=火星', 'type=不存在', 'level=研究生', 'tag=藤校', 'q=' + 'x'.repeat(51)]) {
-    const res = await call(handle, ctx(`/api/universities?${query}`));
-    assert.equal(res.status, 400, query);
-    assert.equal(res.body.error, 'invalid_filter');
-  }
-});
-
-test('高校详情：分数/计划按年份倒序，空字段为 null，未知代码 404', async () => {
-  const { db, handle } = fixture();
-  await seedUniversities(db);
-  const detail = await call(handle, ctx('/api/universities/90001'));
-  assert.equal(detail.status, 200);
-  assert.equal(detail.body.university.name, '测试大学A');
-  assert.equal(detail.body.scores.length, 2);
-  assert.equal(detail.body.scores[0].year, 2025);
-  assert.equal(detail.body.scores[0].min_score, 600);
-  assert.equal(detail.body.scores[1].min_score, null, '空字段必须返回 null，前端显示暂无数据');
-  assert.equal(detail.body.scores[1].min_rank, null);
-  assert.equal(detail.body.plans.length, 1);
-  assert.equal(detail.body.plans[0].major_name, '测试专业');
-  assert.equal(detail.body.plans[0].tuition, 5000);
-
-  const missing = await call(handle, ctx('/api/universities/99998'));
-  assert.equal(missing.status, 404);
-  assert.equal(missing.body.error, 'not_found');
-  assert.equal((await call(handle, ctx('/api/universities/!!!'))).status, 404);
-  assert.equal((await call(handle, ctx('/api/universities/90001', { method: 'POST', body: {} }))).status, 405);
-});
-
 test('专业目录：空库、门类筛选与关键词搜索', async () => {
   const { db, handle } = fixture();
   const empty = await call(handle, ctx('/api/majors'));
@@ -701,4 +610,359 @@ test('首页统计：公开读；未登录时个人计数为 null；计数反映
   assert.equal(otherStats.body.stats.favorites_count, 0);
   assert.equal(otherStats.body.stats.assessments_count, 0);
   assert.equal((await call(handle, ctx('/api/stats', { method: 'POST', body: {} }))).status, 405);
+});
+
+// tick：测评重测需要 created_at 递增，分开两次提交。
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+// ---- 霍兰德兴趣测评（30 题三档版，与 24 题 5 级量表版并存，用户自选） ----
+import { QUESTIONS, computeResult, validateAnswers } from '../functions/assessment30.mjs';
+
+const allAnswers = (value) => Object.fromEntries(QUESTIONS.map((q) => [q.id, value]));
+const dimAnswers = (dim, value) => Object.fromEntries(QUESTIONS.map((q) => [q.id, q.dim === dim ? value : 0]));
+const submit = (handle, cookie, answers) => call(handle, ctx('/api/assessment/submit', { method: 'POST', cookie, body: { answers } }));
+const latest = (handle, cookie) => call(handle, ctx('/api/assessment/latest', { cookie }));
+
+test('测评：题库与计分规则固定（满分、同分顺序、非法答案拒绝）', async () => {
+  assert.equal(QUESTIONS.length, 30);
+  for (const dim of ['R', 'I', 'A', 'S', 'E', 'C']) {
+    assert.equal(QUESTIONS.filter((q) => q.dim === dim).length, 5);
+  }
+  const full = computeResult(dimAnswers('I', 2));
+  assert.equal(full.scores.I, 10);
+  assert.equal(full.scores.R, 0);
+  assert.equal(full.code[0], 'I');
+  // 全部同分：按 R→I→A→S→E→C 固定顺序取前三。
+  assert.equal(computeResult(allAnswers(1)).code, 'RIA');
+  assert.equal(computeResult(allAnswers(0)).code, 'RIA');
+
+  const { handle } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const bad = [
+    undefined,
+    {},
+    { ...allAnswers(1), extra: 1 },
+    (() => { const a = allAnswers(1); delete a.r1; return a; })(),
+    { ...allAnswers(1), r1: 3 },
+    { ...allAnswers(1), r1: -1 },
+    { ...allAnswers(1), r1: 1.5 },
+    { ...allAnswers(1), r1: '2' },
+  ];
+  for (const answers of bad) {
+    const result = await submit(handle, cookie, answers);
+    assert.equal(result.status, 400, `非法答案应被拒绝: ${JSON.stringify(answers)?.slice(0, 60)}`);
+    assert.equal(result.body.error, 'invalid_answers');
+  }
+  assert.throws(() => validateAnswers({ answers: [] }), /invalid_answers/);
+});
+
+test('测评：登录门槛、提交保存、latest 读取与重新测评', async () => {
+  const { db, handle } = fixture();
+  assert.equal((await call(handle, ctx('/api/assessment/questions'))).status, 401);
+  assert.equal((await latest(handle, null)).status, 401);
+  assert.equal((await submit(handle, null, allAnswers(1))).status, 401);
+
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const questions = await call(handle, ctx('/api/assessment/questions', { cookie }));
+  assert.equal(questions.status, 200);
+  assert.equal(questions.body.questions.length, 30);
+  assert.deepEqual(questions.body.options.map((o) => o.value), [0, 1, 2]);
+  assert.ok(!('dim' in questions.body.questions[0]), '题库接口不暴露维度归属');
+  assert.equal((await latest(handle, cookie)).body.result, null);
+
+  const first = await submit(handle, cookie, dimAnswers('A', 2));
+  assert.equal(first.status, 201);
+  assert.equal(first.body.result.code[0], 'A');
+  assert.equal(first.body.result.scores.A, 10);
+  assert.equal(first.body.result.top.length, 3);
+  assert.ok(first.body.result.dimensions.every((d) => Array.isArray(d.majors) && Array.isArray(d.careers)));
+
+  await tick();
+  const second = await submit(handle, cookie, dimAnswers('S', 2));
+  assert.equal(second.status, 201);
+  const current = await latest(handle, cookie);
+  assert.equal(current.body.result.id, second.body.result.id, '重新测评后 latest 应为新记录');
+  assert.equal(current.body.result.code[0], 'S');
+  assert.equal(db.dump('assessments').length, 2, '历史保留，不覆盖');
+
+  // 错误方法与跨来源 CSRF。
+  assert.equal((await call(handle, ctx('/api/assessment/submit', { cookie }))).status, 405);
+  assert.equal((await call(handle, ctx('/api/assessment/latest', { method: 'POST', cookie, body: {} }))).status, 405);
+  assert.equal((await call(handle, ctx('/api/assessment/submit', { method: 'POST', cookie, origin: 'https://evil.test', body: { answers: allAnswers(1) } }))).status, 403);
+});
+
+test('测评：归属来自会话，A/B 互相隔离；写入结果未知不重放', async () => {
+  const { control, db, handle } = fixture();
+  const a = await register(handle, uniqueName('alpha'));
+  const b = await register(handle, uniqueName('bravo'));
+  const cookieA = cookiePair(a), cookieB = cookiePair(b);
+
+  const created = await submit(handle, cookieA, dimAnswers('E', 2));
+  assert.equal(created.status, 201);
+  assert.equal((await latest(handle, cookieB)).body.result, null, 'B 不得看到 A 的测评结果');
+  assert.equal(db.dump('assessments')[0].user_id, a.body.user.id);
+
+  const writesBefore = control.writes.filter((t) => t === 'assessments').length;
+  await tick();
+  control.dropTable = 'assessments';
+  const uncertain = await submit(handle, cookieA, allAnswers(2));
+  assert.equal(uncertain.status, 503);
+  assert.equal(uncertain.body.error, 'assessment_unconfirmed');
+  assert.equal(db.dump('assessments').length, 2, '写入已提交但结果未知');
+  assert.equal(control.writes.filter((t) => t === 'assessments').length - writesBefore, 1, '结果未知时不得重放');
+  // 刷新后 latest 应能看到已提交的那次结果。
+  assert.equal((await latest(handle, cookieA)).body.result.code, 'RIA');
+});
+
+// ---- 模块6扩展：MBTI 风格性格倾向测评（简化版，固定规则计分） ----
+import {
+  DICHOTOMIES, QUESTIONS as MBTI_QUESTIONS, TYPES,
+  computeResult as computeMbti, validateAnswers as validateMbtiAnswers,
+} from '../functions/mbti.mjs';
+
+const mbtiAll = (value) => Object.fromEntries(MBTI_QUESTIONS.map((q) => [q.id, value]));
+const mbtiSubmit = (handle, cookie, answers) => call(handle, ctx('/api/mbti/submit', { method: 'POST', cookie, body: { answers } }));
+const mbtiLatest = (handle, cookie) => call(handle, ctx('/api/mbti/latest', { cookie }));
+
+test('MBTI：题库与计分规则固定（28 题、每维度 7 票、非法答案拒绝）', async () => {
+  assert.equal(MBTI_QUESTIONS.length, 28);
+  for (const dichotomy of DICHOTOMIES) {
+    assert.equal(MBTI_QUESTIONS.filter((q) => q.dim === dichotomy.key).length, 7);
+  }
+  assert.equal(Object.keys(TYPES).length, 16);
+
+  // 全选 A：四个维度都取第一个字母 → ESTJ；全选 B → INFP。
+  const allA = computeMbti(mbtiAll(0));
+  assert.equal(allA.code, 'ESTJ');
+  assert.deepEqual(allA.scores, { E: 7, I: 0, S: 7, N: 0, T: 7, F: 0, J: 7, P: 0 });
+  assert.equal(computeMbti(mbtiAll(1)).code, 'INFP');
+  // 混合：E/I 全 B、S/N 全 A、T/F 全 B、J/P 全 A → ISFJ。
+  const mixedValues = { EI: 1, SN: 0, TF: 1, JP: 0 };
+  const mixed = Object.fromEntries(MBTI_QUESTIONS.map((q) => [q.id, mixedValues[q.dim]]));
+  assert.equal(computeMbti(mixed).code, 'ISFJ');
+
+  const { handle } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const bad = [
+    undefined,
+    {},
+    { ...mbtiAll(0), extra: 1 },
+    (() => { const a = mbtiAll(0); delete a.ei1; return a; })(),
+    { ...mbtiAll(0), ei1: 2 },
+    { ...mbtiAll(0), ei1: -1 },
+    { ...mbtiAll(0), ei1: 0.5 },
+    { ...mbtiAll(0), ei1: '1' },
+  ];
+  for (const answers of bad) {
+    const result = await mbtiSubmit(handle, cookie, answers);
+    assert.equal(result.status, 400, `非法答案应被拒绝: ${JSON.stringify(answers)?.slice(0, 60)}`);
+    assert.equal(result.body.error, 'invalid_answers');
+  }
+  assert.throws(() => validateMbtiAnswers({ answers: [] }), /invalid_answers/);
+});
+
+test('MBTI：登录门槛、提交保存、latest 读取、重新测评与 RIASEC 互不干扰', async () => {
+  const { db, handle } = fixture();
+  assert.equal((await call(handle, ctx('/api/mbti/questions'))).status, 401);
+  assert.equal((await mbtiLatest(handle, null)).status, 401);
+  assert.equal((await mbtiSubmit(handle, null, mbtiAll(0))).status, 401);
+
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const questions = await call(handle, ctx('/api/mbti/questions', { cookie }));
+  assert.equal(questions.status, 200);
+  assert.equal(questions.body.questions.length, 28);
+  assert.ok(questions.body.questions.every((q) => typeof q.a === 'string' && typeof q.b === 'string'));
+  assert.ok(!('dim' in questions.body.questions[0]), '题库接口不暴露维度归属');
+  assert.equal((await mbtiLatest(handle, cookie)).body.result, null);
+
+  const first = await mbtiSubmit(handle, cookie, mbtiAll(0));
+  assert.equal(first.status, 201);
+  assert.equal(first.body.result.code, 'ESTJ');
+  assert.equal(first.body.result.type.name, TYPES.ESTJ.name);
+  assert.equal(first.body.result.dichotomies.length, 4);
+  assert.ok(first.body.result.dichotomies.every((d) => d.poles.length === 2 && d.poles.every((p) => typeof p.count === 'number')));
+
+  await tick();
+  const second = await mbtiSubmit(handle, cookie, mbtiAll(1));
+  assert.equal(second.status, 201);
+  assert.equal(second.body.result.code, 'INFP');
+  const current = await mbtiLatest(handle, cookie);
+  assert.equal(current.body.result.id, second.body.result.id, '重新测评后 latest 应为新记录');
+  assert.equal(db.dump('assessments').length, 2, '历史保留，不覆盖');
+  assert.ok(db.dump('assessments').every((row) => row.kind === 'mbti'));
+
+  // 同一账号再做霍兰德（24 题 5 级量表，写 assessment_results 表）：两种测评互不干扰。
+  const riasec = await call(handle, ctx('/api/assessments', { method: 'POST', cookie, body: { answers: Array(24).fill(3) } }));
+  assert.equal(riasec.status, 201);
+  assert.equal((await mbtiLatest(handle, cookie)).body.result.code, 'INFP');
+  assert.equal(db.dump('assessments').length, 2, '霍兰德记录不进 assessments 表');
+  assert.equal(db.dump('assessment_results').length, 1);
+
+  // 错误方法与跨来源 CSRF。
+  assert.equal((await call(handle, ctx('/api/mbti/submit', { cookie }))).status, 405);
+  assert.equal((await call(handle, ctx('/api/mbti/latest', { method: 'POST', cookie, body: {} }))).status, 405);
+  assert.equal((await call(handle, ctx('/api/mbti/questions', { method: 'POST', cookie, body: {} }))).status, 405);
+  assert.equal((await call(handle, ctx('/api/mbti/submit', { method: 'POST', cookie, origin: 'https://evil.test', body: { answers: mbtiAll(0) } }))).status, 403);
+});
+
+test('MBTI：归属来自会话，A/B 互相隔离；写入结果未知不重放', async () => {
+  const { control, db, handle } = fixture();
+  const a = await register(handle, uniqueName('alpha'));
+  const b = await register(handle, uniqueName('bravo'));
+  const cookieA = cookiePair(a), cookieB = cookiePair(b);
+
+  const created = await mbtiSubmit(handle, cookieA, mbtiAll(1));
+  assert.equal(created.status, 201);
+  assert.equal((await mbtiLatest(handle, cookieB)).body.result, null, 'B 不得看到 A 的测评结果');
+  assert.equal(db.dump('assessments')[0].user_id, a.body.user.id);
+  assert.equal(db.dump('assessments')[0].kind, 'mbti');
+
+  const writesBefore = control.writes.filter((t) => t === 'assessments').length;
+  await tick();
+  control.dropTable = 'assessments';
+  const uncertain = await mbtiSubmit(handle, cookieA, mbtiAll(0));
+  assert.equal(uncertain.status, 503);
+  assert.equal(uncertain.body.error, 'assessment_unconfirmed');
+  assert.equal(db.dump('assessments').length, 2, '写入已提交但结果未知');
+  assert.equal(control.writes.filter((t) => t === 'assessments').length - writesBefore, 1, '结果未知时不得重放');
+  // 刷新后 latest 应能看到已提交的那次结果。
+  assert.equal((await mbtiLatest(handle, cookieA)).body.result.code, 'ESTJ');
+});
+
+
+// ===== 模块5：高校与录取数据（匿名查询 + 管理员导入）=====
+const UNI_SOURCE = '河南省阳光高考信息平台（河南省教育厅）《往年参考 - 清华大学 - 录取分数查询》；整理日期：2026-11-18';
+const UNIVERSITY_ROW = { code: '10003', name: '清华大学', province: null, city: null, type: null, level: null, tags: null, website: null, source: UNI_SOURCE, note: null };
+const UNIVERSITY_ROW2 = { code: '10001', name: '北京大学', province: null, city: null, type: null, level: null, tags: null, website: null, source: UNI_SOURCE, note: null };
+const SCORE_ROW = { university_code: '10003', school_name: '清华大学', province: '河南', year: 2025, category: '物理类', batch: '本科批', subject_requirement: null, min_score: '700', min_rank: 108, admitted_count: null, source: UNI_SOURCE, note: '按该校本科批各专业最低分取最低值' };
+const SCORE_DECIMAL = { ...SCORE_ROW, category: '历史类', batch: '艺术本科批', min_score: '339.75', min_rank: null, note: '艺术类综合分' };
+const PLAN_ROW = { university_code: '00031', school_name: '清华大学', province: '河南', year: 2025, major_code: null, major_name: '工科试验班', batch: '本科批', subject_requirement: '物理+化学', plan_count: 5, tuition: 5000, source: UNI_SOURCE, note: '办学地点：北京' };
+const PLAN_ROW2 = { ...PLAN_ROW, note: '办学地点：深圳' };
+const RUN_ID = 'a'.repeat(64);
+
+async function adminFixture() {
+  const f = fixture();
+  const reg = await register(f.handle, uniqueName('admin'));
+  await f.db.from('users').update({ role: 'admin' }).eq('id', reg.body.user.id);
+  return { ...f, cookie: cookiePair(reg), adminId: reg.body.user.id };
+}
+const postImport = (handle, cookie, body) => call(handle, ctx('/api/admin/import', { method: 'POST', cookie, body }));
+const postMeta = (handle, cookie, body) => call(handle, ctx('/api/admin/meta', { method: 'POST', cookie, body }));
+const chunk = (table, rows, chunkIndex = 0) => ({ table, run_id: RUN_ID, chunk_index: chunkIndex, rows });
+
+test('模块5：匿名查询空库返回空索引；未知院校代码 404', async () => {
+  const { handle } = fixture();
+  const list = await call(handle, ctx('/api/universities'));
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.body.universities, []);
+  assert.deepEqual(list.body.counts, { universities: 0, admission_scores: 0, enrollment_plans: 0 });
+  const detail = await call(handle, ctx('/api/universities/99999'));
+  assert.equal(detail.status, 404);
+  assert.equal(detail.body.error, 'not_found');
+});
+
+test('模块5：导入需管理员；匿名 401、学生 403、admin 200', async () => {
+  const { handle, cookie } = await adminFixture();
+  const anon = await postImport(handle, null, chunk('universities', [UNIVERSITY_ROW]));
+  assert.equal(anon.status, 401);
+  const student = await register(handle, uniqueName('stu'));
+  const forbidden = await postImport(handle, cookiePair(student), chunk('universities', [UNIVERSITY_ROW]));
+  assert.equal(forbidden.status, 403);
+  assert.equal(forbidden.body.error, 'admin_required');
+  const ok = await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW]));
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.inserted, 1);
+});
+
+test('模块5：院校导入幂等（同 run+chunk 重试不重复）', async () => {
+  const { handle, cookie, db } = await adminFixture();
+  const first = await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW, UNIVERSITY_ROW2]));
+  assert.equal(first.body.inserted, 2);
+  const retry = await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW, UNIVERSITY_ROW2]));
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.inserted, 0, '确定性主键使重试不重复插入');
+  assert.equal(db.dump('universities').length, 2);
+});
+
+test('模块5：导入行服务端复核（省份/科类/分数/来源）', async () => {
+  const { handle, cookie } = await adminFixture();
+  await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW]));
+  const badProvince = await postImport(handle, cookie, chunk('admission_scores', [{ ...SCORE_ROW, province: '广东' }]));
+  assert.equal(badProvince.status, 400);
+  const badScore = await postImport(handle, cookie, chunk('admission_scores', [{ ...SCORE_ROW, min_score: '700.555' }]));
+  assert.equal(badScore.status, 400);
+  const badSource = await postImport(handle, cookie, chunk('admission_scores', [{ ...SCORE_ROW, source: '' }]));
+  assert.equal(badSource.status, 400);
+  const badTable = await postImport(handle, cookie, chunk('users', [UNIVERSITY_ROW]));
+  assert.equal(badTable.status, 400);
+  const okDecimal = await postImport(handle, cookie, chunk('admission_scores', [SCORE_DECIMAL]));
+  assert.equal(okDecimal.status, 200, '艺术/体育综合分允许两位小数');
+});
+
+test('模块5：录取/计划导入与详情查询（计划按名称关联、同键多行保留）', async () => {
+  const { handle, cookie, db } = await adminFixture();
+  await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW]));
+  await postImport(handle, cookie, chunk('admission_scores', [SCORE_ROW, SCORE_DECIMAL]));
+  const plans = await postImport(handle, cookie, chunk('enrollment_plans', [PLAN_ROW, PLAN_ROW2]));
+  assert.equal(plans.body.inserted, 2, '同专业同批次不同办学地点的两行都保留');
+  assert.equal(db.dump('enrollment_plans').length, 2);
+
+  await postMeta(handle, cookie, { key: 'universities_index', value: [{ code: '10003', name: '清华大学' }] });
+  await postMeta(handle, cookie, { key: 'plan_facets', value: { provinces: ['河南'], years: [2025], batches: ['本科批'] } });
+  await postMeta(handle, cookie, { key: 'counts', value: { universities: 1, admission_scores: 2, enrollment_plans: 2 } });
+
+  const list = await call(handle, ctx('/api/universities'));
+  assert.deepEqual(list.body.universities, [{ code: '10003', name: '清华大学' }]);
+  assert.equal(list.body.counts.admission_scores, 2);
+
+  const detail = await call(handle, ctx('/api/universities/10003?year=2025'));
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.university.name, '清华大学');
+  assert.equal(detail.body.scores.length, 2);
+  assert.ok(detail.body.scores.some((s) => s.min_score === '339.75'), '小数综合分原值保留');
+  assert.equal(detail.body.plan_year, 2025);
+  assert.equal(detail.body.plans.length, 2, '计划表用报考代码 00031，仍按学校名称关联到 10003');
+  assert.ok(detail.body.plans.every((p) => p.school_name === '清华大学'));
+
+  const noYear = await call(handle, ctx('/api/universities/10003?year=2024'));
+  assert.equal(noYear.body.plans.length, 0, '无该年计划时返回空（前端显示暂无数据）');
+});
+
+test('模块5：元数据需管理员且形状受校验', async () => {
+  const { handle, cookie } = await adminFixture();
+  const student = await register(handle, uniqueName('stu2'));
+  assert.equal((await postMeta(handle, cookiePair(student), { key: 'counts', value: { universities: 1, admission_scores: 0, enrollment_plans: 0 } })).status, 403);
+  assert.equal((await postMeta(handle, cookie, { key: 'evil', value: {} })).status, 400);
+  assert.equal((await postMeta(handle, cookie, { key: 'counts', value: { universities: -1, admission_scores: 0, enrollment_plans: 0 } })).status, 400);
+  const ok = await postMeta(handle, cookie, { key: 'counts', value: { universities: 1, admission_scores: 0, enrollment_plans: 0 } });
+  assert.equal(ok.status, 200);
+  const again = await postMeta(handle, cookie, { key: 'counts', value: { universities: 2, admission_scores: 0, enrollment_plans: 0 } });
+  assert.equal(again.status, 200, '已存在的键走更新路径');
+});
+
+test('模块5：大院校索引元数据（>8KB）可保存并回读', async () => {
+  const { handle, cookie } = await adminFixture();
+  const index = Array.from({ length: 300 }, (_, i) => ({ code: `C${i}`, name: `示例院校名称较长用于超出默认正文上限${i}` }));
+  const saved = await postMeta(handle, cookie, { key: 'universities_index', value: index });
+  assert.equal(saved.status, 200, '院校索引不受默认 8KB 正文上限限制');
+  const list = await call(handle, ctx('/api/universities'));
+  assert.equal(list.body.universities.length, 300);
+});
+
+test('模块5：写入被拒不回退；响应丢失经确定性主键恢复不重复', async () => {
+  const { handle, cookie, db, control } = await adminFixture();
+  await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW]));
+  control.rejectTable = 'enrollment_plans';
+  const rejected = await postImport(handle, cookie, chunk('enrollment_plans', [PLAN_ROW]));
+  assert.equal(rejected.status, 503);
+  assert.equal(rejected.body.error, 'database_unavailable');
+  assert.equal(db.dump('enrollment_plans').length, 0, '明确拒绝不得落库');
+
+  control.dropTable = 'enrollment_plans';
+  const dropped = await postImport(handle, cookie, chunk('enrollment_plans', [PLAN_ROW, PLAN_ROW2]));
+  assert.equal(dropped.status, 200, '批量响应丢失后逐行回退恢复');
+  assert.equal(db.dump('enrollment_plans').length, 2, '已提交行不重复插入');
+  const retry = await postImport(handle, cookie, chunk('enrollment_plans', [PLAN_ROW, PLAN_ROW2]));
+  assert.equal(retry.body.inserted, 0);
+  assert.equal(db.dump('enrollment_plans').length, 2);
 });

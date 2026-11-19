@@ -37,19 +37,31 @@ CREATE TABLE app.auth_limiter (
 -- 导入前先用 node db/import/validate.mjs 校验，再用 node db/import/to-sql.mjs 生成入库 SQL。
 -- 没有数据的字段一律 NULL，前端对应位置显示「暂无数据」，绝不编造分数、位次或排名。
 -- 本文件追加新表，不改动模块2 已有三张表；新表由平台审核迁移流程应用。
+--
+-- 合并说明（main + feature/module5-henan，2026-11-19）：
+-- * universities：两边列的并集（website 来自河南分支，admission_url 来自 main）。
+--   官方分数文件往往不含院校属性，province/type/level 按河南分支改为可空。
+-- * admission_scores：id 用 text（河南分支的导入 id 是 SHA-256 摘要，main 的 uuid
+--   字符串同样能存）；min_score 用 text 保存官方原值（艺术/体育类综合分带小数）；
+--   school_name 来自河南分支（计划表按学校名称关联院校时复用）。
+-- * enrollment_plans：id 用 text；university_code 与 major_code 不设外键——计划表
+--   用省报考代码，与录取表的国标代码不同源，外键会拦住河南真实数据；同专业同批次
+--   可能因办学地点不同有多行，不设业务唯一键；school_name 关联院校。
+-- * created_at 在三张表上均为可空：河南分支的管理员导入不写该列。
 
 CREATE TABLE app.universities (
   code text PRIMARY KEY,
   name text NOT NULL UNIQUE,
-  province text NOT NULL,
+  province text,
   city text,
-  type text NOT NULL,
-  level text NOT NULL,
+  type text,
+  level text,
   tags text,
+  website text,
   admission_url text,
   source text NOT NULL,
   note text,
-  created_at timestamptz NOT NULL
+  created_at timestamptz
 );
 
 CREATE TABLE app.majors (
@@ -63,29 +75,36 @@ CREATE TABLE app.majors (
   created_at timestamptz NOT NULL
 );
 
+-- id 为导入 run+chunk+行号 的 SHA-256 摘要：同一文件重复导入幂等。
+-- 录取表业务键唯一（官方数据每院校+省份+年份+科类+批次一行）。
 CREATE TABLE app.admission_scores (
-  id uuid PRIMARY KEY,
+  id text PRIMARY KEY,
   university_code text NOT NULL REFERENCES app.universities (code),
+  school_name text,
   province text NOT NULL,
   year integer NOT NULL,
   category text NOT NULL,
   batch text NOT NULL,
   subject_requirement text,
-  min_score integer,
+  min_score text,
   min_rank integer,
   admitted_count integer,
   source text NOT NULL,
   note text,
-  created_at timestamptz NOT NULL,
+  created_at timestamptz,
   UNIQUE (university_code, province, year, category, batch)
 );
+CREATE INDEX admission_scores_university_idx ON app.admission_scores (university_code, province, year);
 
+-- 计划表用省报考代码（与录取表国标代码不同源），按 school_name 关联院校；
+-- 同专业同批次可能因办学地点不同有多行，不设业务唯一键。
 CREATE TABLE app.enrollment_plans (
-  id uuid PRIMARY KEY,
-  university_code text NOT NULL REFERENCES app.universities (code),
+  id text PRIMARY KEY,
+  university_code text NOT NULL,
+  school_name text NOT NULL,
   province text NOT NULL,
   year integer NOT NULL,
-  major_code text REFERENCES app.majors (code),
+  major_code text,
   major_name text NOT NULL,
   batch text,
   subject_requirement text,
@@ -93,8 +112,15 @@ CREATE TABLE app.enrollment_plans (
   tuition integer,
   source text NOT NULL,
   note text,
-  created_at timestamptz NOT NULL,
-  UNIQUE (university_code, province, year, major_name, batch)
+  created_at timestamptz
+);
+CREATE INDEX enrollment_plans_school_idx ON app.enrollment_plans (school_name, province, year);
+
+-- 导入完成后写入的展示元数据：院校索引、筛选选项、行数（管理员导入路由维护）。
+CREATE TABLE app.data_meta (
+  key text PRIMARY KEY,
+  value jsonb NOT NULL,
+  updated_at timestamptz NOT NULL
 );
 
 -- EduAI 模块4：学习资料库。
@@ -130,7 +156,7 @@ CREATE TABLE app.favorites (
   PRIMARY KEY (user_id, resource_id)
 );
 
--- EduAI 模块6：兴趣测评记录（霍兰德 RIASEC 简化版，规则评分，不调用 AI）。
+-- EduAI 模块6：兴趣测评记录（霍兰德 RIASEC 简化版，24 题 5 级量表，规则评分，不调用 AI）。
 -- 答案与得分以 JSON 文本保存；得分由后端按 functions/assessment.mjs 的固定规则
 -- 从答案重算，不信任浏览器提交的分数。用户只能查看自己的记录。
 
@@ -142,3 +168,20 @@ CREATE TABLE app.assessment_results (
   top_types text NOT NULL,
   created_at timestamptz NOT NULL
 );
+
+-- 模块6扩展：MBTI 风格性格倾向测评（简化版）与霍兰德共用本表，answers/scores 为 jsonb，
+-- 形状由 Function 校验；kind 区分测评类型（riasec / mbti），Function 每次写入都显式提供；
+-- 每次提交一行（重新测评不覆盖历史），latest 按 kind + created_at 倒序取第一行。
+-- 注：云端 kind 列为可空（平台受限 DDL 不允许新增列带默认值），旧行已回填 riasec。
+-- 合并说明：本分支的霍兰德走 assessment_results（24 题 5 级量表）；本表目前只由 MBTI
+-- 写入（kind='mbti'）。
+CREATE TABLE app.assessments (
+  id uuid PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES app.users (id),
+  kind text,
+  answers jsonb NOT NULL,
+  scores jsonb NOT NULL,
+  code text NOT NULL,
+  created_at timestamptz NOT NULL
+);
+CREATE INDEX assessments_user_created_at_idx ON app.assessments (user_id, created_at);
