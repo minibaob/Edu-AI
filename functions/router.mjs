@@ -3,6 +3,9 @@
 // 绝不使用 ctx.user、平台身份、Host 头或浏览器提交的 owner_id。
 import { AppError, applicationPath, errorJson, json, readJson, requireTrustedOrigin, rows } from './http.mjs';
 import { canonicalUsername, validatePassword, validateProfile } from './validate.mjs';
+import { isUuid, parseListQuery, parseMajorQuery, parseUniversityQuery, validateResourceInput, validateUniversityCode } from './validate.mjs';
+import { GRADES, RESOURCE_TYPES, SUBJECTS } from './validate.mjs';
+import { scoreAssessment, validateAnswers } from './assessment.mjs';
 import { hashPassword, verifyPassword, verifyPasswordAgainstDummy } from './passwords.mjs';
 import { SESSION_TTL_MS, clearSessionCookie, createSession, revokeSession, sessionCookie, validateSession } from './sessions.mjs';
 import { consume } from './limiter.mjs';
@@ -45,6 +48,45 @@ function publicUser(row) {
     role: row.role,
     created_at: row.created_at,
   };
+}
+
+// ---- 首页统计：公开读；个人计数只在登录后返回 ----
+// 计数上限 500 行（假数据库/适配器按读取上限截断）；表尚未迁移或查询失败时
+// 该项返回 null，前端显示「暂无数据」，不让整个接口 500。
+async function countRows(db, table, filters = {}) {
+  try {
+    let query = db.from(table).select('id').limit(500);
+    for (const [key, value] of Object.entries(filters)) query = query.eq(key, value);
+    return rows(await query).length;
+  } catch {
+    return null;
+  }
+}
+
+async function stats(db, request) {
+  const session = await validateSession(db, request);
+  const userId = session.state === 'valid' ? session.session.userId : null;
+  const resourcesTotal = await countRows(db, 'resources');
+  const universitiesTotal = await countRows(db, 'universities');
+  let favoritesCount = null;
+  let assessmentsCount = null;
+  if (userId) {
+    try {
+      const mine = rows(await db.from('favorites').select('id,revoked_at').eq('user_id', userId).limit(500));
+      favoritesCount = mine.filter((row) => row.revoked_at == null).length;
+    } catch {
+      favoritesCount = null;
+    }
+    assessmentsCount = await countRows(db, 'assessment_results', { user_id: userId });
+  }
+  return json({
+    stats: {
+      resources_total: resourcesTotal,
+      universities_total: universitiesTotal,
+      favorites_count: favoritesCount,
+      assessments_count: assessmentsCount,
+    },
+  });
 }
 
 // 会话凭据只在服务端校验；用户资料单独读取（会话表里只有摘要、用户 ID 与时间）。
@@ -173,11 +215,296 @@ async function changePassword(db, request, session) {
   return json({ ok: true });
 }
 
+// ---- 模块5：高校与录取数据（公开读接口，无需登录） ----
+// 数据层适配器只提供等值筛选：先按可等值条件取数（上限 500 行），再在内存中做
+// 关键词/枚举筛选与分页。首期数据量小（试点两省），该做法够用；数据量上千后
+// 应改由数据库端筛选（见改进建议）。空字段一律返回 null，前端显示「暂无数据」。
+const READ_LIMIT = 500;
+const UNIVERSITY_COLUMNS = 'code,name,province,city,type,level,tags,admission_url,source,note';
+const MAJOR_COLUMNS = 'code,name,category,years,degree,source,note';
+const SCORE_COLUMNS = 'id,university_code,province,year,category,batch,subject_requirement,min_score,min_rank,admitted_count,source,note';
+const PLAN_COLUMNS = 'id,university_code,province,year,major_code,major_name,batch,subject_requirement,plan_count,tuition,source,note';
+
+async function fetchAll(db, table, columns) {
+  return rows(await db.from(table).select(columns).limit(READ_LIMIT));
+}
+
+function splitTags(value) {
+  if (typeof value !== 'string' || value === '') return [];
+  return value.split('|').map((t) => t.trim()).filter(Boolean);
+}
+
+function publicUniversity(row) {
+  return {
+    code: row.code,
+    name: row.name,
+    province: row.province,
+    city: row.city ?? null,
+    type: row.type,
+    level: row.level,
+    tags: splitTags(row.tags),
+    admission_url: row.admission_url ?? null,
+    source: row.source,
+    note: row.note ?? null,
+  };
+}
+
+function publicMajor(row) {
+  return {
+    code: row.code,
+    name: row.name,
+    category: row.category,
+    years: row.years,
+    degree: row.degree ?? null,
+    source: row.source,
+    note: row.note ?? null,
+  };
+}
+
+function byYearDesc(a, b) {
+  return (b.year - a.year) || String(a.province).localeCompare(String(b.province), 'zh')
+    || String(a.category ?? a.major_name ?? '').localeCompare(String(b.category ?? b.major_name ?? ''), 'zh')
+    || String(a.batch ?? '').localeCompare(String(b.batch ?? ''), 'zh');
+}
+
+async function listUniversities(db, request) {
+  const query = parseUniversityQuery(new URL(request.url).search);
+  const all = await fetchAll(db, 'universities', UNIVERSITY_COLUMNS);
+  const needle = query.q.toLowerCase();
+  const filtered = all.filter((row) => {
+    if (query.province && row.province !== query.province) return false;
+    if (query.type && row.type !== query.type) return false;
+    if (query.level && row.level !== query.level) return false;
+    if (query.tag && !splitTags(row.tags).includes(query.tag)) return false;
+    if (needle && !(String(row.name).toLowerCase().includes(needle) || String(row.code).toLowerCase().includes(needle))) return false;
+    return true;
+  });
+  filtered.sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
+  const total = filtered.length;
+  const items = filtered.slice(query.offset, query.offset + query.limit).map(publicUniversity);
+  return json({ total, items });
+}
+
+async function getUniversity(db, code) {
+  validateUniversityCode(code);
+  const found = rows(await db.from('universities').select(UNIVERSITY_COLUMNS).eq('code', code).limit(1));
+  if (found.length !== 1) throw new AppError('not_found', 404);
+  const scores = (await fetchAll(db, 'admission_scores', SCORE_COLUMNS))
+    .filter((row) => row.university_code === code)
+    .sort(byYearDesc)
+    .map((row) => ({
+      id: row.id, province: row.province, year: row.year, category: row.category,
+      batch: row.batch, subject_requirement: row.subject_requirement ?? null,
+      min_score: row.min_score ?? null, min_rank: row.min_rank ?? null,
+      admitted_count: row.admitted_count ?? null, source: row.source, note: row.note ?? null,
+    }));
+  const plans = (await fetchAll(db, 'enrollment_plans', PLAN_COLUMNS))
+    .filter((row) => row.university_code === code)
+    .sort(byYearDesc)
+    .map((row) => ({
+      id: row.id, province: row.province, year: row.year, major_code: row.major_code ?? null,
+      major_name: row.major_name, batch: row.batch ?? null,
+      subject_requirement: row.subject_requirement ?? null, plan_count: row.plan_count ?? null,
+      tuition: row.tuition ?? null, source: row.source, note: row.note ?? null,
+    }));
+  return json({ university: publicUniversity(found[0]), scores, plans });
+}
+
+async function listMajors(db, request) {
+  const query = parseMajorQuery(new URL(request.url).search);
+  const all = await fetchAll(db, 'majors', MAJOR_COLUMNS);
+  const needle = query.q.toLowerCase();
+  const filtered = all.filter((row) => {
+    if (query.category && row.category !== query.category) return false;
+    if (needle && !(String(row.name).toLowerCase().includes(needle) || String(row.code).toLowerCase().includes(needle))) return false;
+    return true;
+  });
+  filtered.sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
+  const total = filtered.length;
+  const items = filtered.slice(query.offset, query.offset + query.limit).map(publicMajor);
+  return json({ total, items });
+}
+// ---- 模块4：学习资料库 ----
+// 读接口公开；写接口（登记、收藏）必须登录，归属一律来自会话，绝不信任浏览器提交的 owner_id。
+// 文件直传未接通：登记只接受来源链接型资料；file_* 字段由 validateResourceInput 拒绝。
+const RESOURCE_COLUMNS = 'id,owner_id,title,grade,subject,type,source_url,source_name,description,file_name,file_size,mime,storage_key,copyright_confirmed,created_at';
+const FAVORITE_COLUMNS = 'user_id,resource_id,created_at,revoked_at';
+
+function publicResource(row, favorited = false) {
+  return {
+    id: row.id,
+    owner_id: row.owner_id ?? null,
+    title: row.title,
+    grade: row.grade ?? null,
+    subject: row.subject ?? null,
+    type: row.type,
+    source_url: row.source_url,
+    source_name: row.source_name,
+    description: row.description ?? null,
+    file_name: row.file_name ?? null,
+    file_size: row.file_size ?? null,
+    mime: row.mime ?? null,
+    copyright_confirmed: row.copyright_confirmed === true,
+    favorited,
+    created_at: row.created_at,
+  };
+}
+
+function parseResourceQuery(request) {
+  const params = new URLSearchParams(new URL(request.url).search);
+  const base = parseListQuery(new URL(request.url).search);
+  const pick = (name, allowed) => {
+    const value = params.get(name);
+    if (value === null || value === '') return null;
+    if (!allowed.includes(value)) throw new AppError('invalid_filter', 400);
+    return value;
+  };
+  return {
+    ...base,
+    grade: pick('grade', GRADES),
+    subject: pick('subject', SUBJECTS),
+    type: pick('type', RESOURCE_TYPES),
+    mine: params.get('mine') === '1',
+  };
+}
+
+async function listResources(db, request) {
+  const query = parseResourceQuery(request);
+  let mineUserId = null;
+  if (query.mine) {
+    const session = await requireSession(db, request);
+    mineUserId = session.userId;
+  }
+  const all = rows(await db.from('resources').select(RESOURCE_COLUMNS).limit(500));
+  const needle = query.q.toLowerCase();
+  const filtered = all.filter((row) => {
+    if (mineUserId !== null && row.owner_id !== mineUserId) return false;
+    if (query.grade && row.grade !== query.grade) return false;
+    if (query.subject && row.subject !== query.subject) return false;
+    if (query.type && row.type !== query.type) return false;
+    if (needle && !(String(row.title).toLowerCase().includes(needle)
+      || String(row.description ?? '').toLowerCase().includes(needle)
+      || String(row.source_name).toLowerCase().includes(needle))) return false;
+    return true;
+  });
+  filtered.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  const total = filtered.length;
+  const items = filtered.slice(query.offset, query.offset + query.limit).map((row) => publicResource(row));
+  return json({ total, items });
+}
+
+async function getResource(db, request, id) {
+  if (!isUuid(id)) throw new AppError('not_found', 404);
+  const found = rows(await db.from('resources').select(RESOURCE_COLUMNS).eq('id', id).limit(1));
+  if (found.length !== 1) throw new AppError('not_found', 404);
+  let favorited = false;
+  try {
+    const result = await validateSession(db, request);
+    if (result.state === 'valid' && result.session) {
+      const fav = rows(await db.from('favorites').select(FAVORITE_COLUMNS)
+        .eq('user_id', result.session.userId).eq('resource_id', id).limit(1));
+      favorited = fav.length === 1 && !fav[0].revoked_at;
+    }
+  } catch {
+    favorited = false;
+  }
+  return json({ resource: publicResource(found[0], favorited) });
+}
+
+async function createResource(db, request, session) {
+  const body = await readJson(request);
+  const input = validateResourceInput(body);
+  const id = crypto.randomUUID();
+  const created = rows(await db.from('resources').insertIfAbsent({
+    id,
+    owner_id: session.userId,
+    ...input,
+    file_name: null,
+    file_size: null,
+    mime: null,
+    storage_key: null,
+    copyright_confirmed: true,
+    created_at: new Date().toISOString(),
+  }, { onConflict: 'id' }).select(RESOURCE_COLUMNS));
+  if (created.length !== 1) return errorJson('resource_unconfirmed', 503);
+  return json({ resource: publicResource(created[0]) }, 201);
+}
+
+async function favoriteResource(db, request, session, id) {
+  if (!isUuid(id)) throw new AppError('not_found', 404);
+  const found = rows(await db.from('resources').select('id').eq('id', id).limit(1));
+  if (found.length !== 1) throw new AppError('not_found', 404);
+  const inserted = rows(await db.from('favorites').insertIfAbsent({
+    user_id: session.userId, resource_id: id, created_at: new Date().toISOString(), revoked_at: null,
+  }, { onConflict: 'user_id,resource_id' }).select(FAVORITE_COLUMNS));
+  if (inserted.length !== 1) {
+    // 已收藏过（曾取消）：把撤销标记清掉，重新生效；只改自己的收藏。
+    await db.from('favorites').update({ revoked_at: null })
+      .eq('user_id', session.userId).eq('resource_id', id);
+  }
+  return json({ favorited: true });
+}
+
+async function unfavoriteResource(db, request, session, id) {
+  if (!isUuid(id)) throw new AppError('not_found', 404);
+  await db.from('favorites').update({ revoked_at: new Date().toISOString() })
+    .eq('user_id', session.userId).eq('resource_id', id);
+  return json({ favorited: false });
+}
+
+async function listFavorites(db, request, session) {
+  const favs = rows(await db.from('favorites').select(FAVORITE_COLUMNS).eq('user_id', session.userId).limit(500));
+  const active = favs.filter((f) => !f.revoked_at);
+  const all = rows(await db.from('resources').select(RESOURCE_COLUMNS).limit(500));
+  const byId = new Map(all.map((row) => [row.id, row]));
+  const items = active
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .map((f) => byId.get(f.resource_id))
+    .filter(Boolean)
+    .map((row) => publicResource(row, true));
+  return json({ total: items.length, items });
+}
+// ---- 模块6：兴趣测评记录（登录后保存/查看自己的记录） ----
+// 分数由后端按固定规则从答案重算，不信任浏览器提交的分数。
+const ASSESSMENT_COLUMNS = 'id,user_id,answers,scores,top_types,created_at';
+
+async function saveAssessment(db, request, session) {
+  const body = await readJson(request);
+  const answers = validateAnswers(body?.answers);
+  const { scores, top_types } = scoreAssessment(answers);
+  const id = crypto.randomUUID();
+  const created = rows(await db.from('assessment_results').insertIfAbsent({
+    id,
+    user_id: session.userId,
+    answers: JSON.stringify(answers),
+    scores: JSON.stringify(scores),
+    top_types: JSON.stringify(top_types),
+    created_at: new Date().toISOString(),
+  }, { onConflict: 'id' }).select(ASSESSMENT_COLUMNS));
+  if (created.length !== 1) return errorJson('assessment_unconfirmed', 503);
+  const row = created[0];
+  return json({
+    assessment: {
+      id: row.id, scores: JSON.parse(row.scores), top_types: JSON.parse(row.top_types), created_at: row.created_at,
+    },
+  }, 201);
+}
+
+async function listAssessments(db, request, session) {
+  const all = rows(await db.from('assessment_results').select(ASSESSMENT_COLUMNS).eq('user_id', session.userId).limit(500));
+  all.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  const items = all.slice(0, 20).map((row) => ({
+    id: row.id, scores: JSON.parse(row.scores), top_types: JSON.parse(row.top_types), created_at: row.created_at,
+  }));
+  return json({ total: all.length, items });
+}
+
 async function route(db, request, origin) {
   requireTrustedOrigin(request, origin);
   const path = applicationPath(request);
 
   if (path === '/api/health' && request.method === 'GET') return json({ ok: true });
+  if (path === '/api/stats' && request.method === 'GET') return stats(db, request);
   if (path === '/api/register' && request.method === 'POST') return register(db, request);
   if (path === '/api/login' && request.method === 'POST') return login(db, request);
   if (path === '/api/logout' && request.method === 'POST') return logout(db, request);
@@ -197,7 +524,40 @@ async function route(db, request, origin) {
     return changePassword(db, request, session);
   }
 
-  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health'].includes(path)) {
+  if (path === '/api/universities' && request.method === 'GET') return listUniversities(db, request);
+  const universityDetail = path.match(/^\/api\/universities\/([0-9A-Za-z]{1,10})$/);
+  if (universityDetail && request.method === 'GET') return getUniversity(db, universityDetail[1]);
+  if (path === '/api/majors' && request.method === 'GET') return listMajors(db, request);
+  if (path === '/api/resources' && request.method === 'GET') return listResources(db, request);
+  if (path === '/api/resources' && request.method === 'POST') {
+    const session = await requireSession(db, request);
+    return createResource(db, request, session);
+  }
+  if (path === '/api/favorites' && request.method === 'GET') {
+    const session = await requireSession(db, request);
+    return listFavorites(db, request, session);
+  }
+  const favoriteMatch = path.match(/^\/api\/resources\/([0-9a-f-]{36})\/(favorite|unfavorite)$/);
+  if (favoriteMatch && request.method === 'POST') {
+    const session = await requireSession(db, request);
+    return favoriteMatch[2] === 'favorite'
+      ? favoriteResource(db, request, session, favoriteMatch[1])
+      : unfavoriteResource(db, request, session, favoriteMatch[1]);
+  }
+  const resourceDetail = path.match(/^\/api\/resources\/([0-9a-f-]{36})$/);
+  if (resourceDetail && request.method === 'GET') return getResource(db, request, resourceDetail[1]);
+
+  if (path === '/api/assessments' && request.method === 'GET') {
+    const session = await requireSession(db, request);
+    return listAssessments(db, request, session);
+  }
+  if (path === '/api/assessments' && request.method === 'POST') {
+    const session = await requireSession(db, request);
+    return saveAssessment(db, request, session);
+  }
+
+  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health', '/api/universities', '/api/majors', '/api/resources', '/api/favorites', '/api/assessments', '/api/stats'].includes(path)
+    || universityDetail || resourceDetail || favoriteMatch) {
     throw new AppError('method_not_allowed', 405);
   }
   throw new AppError('not_found', 404);

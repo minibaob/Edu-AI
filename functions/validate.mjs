@@ -74,7 +74,117 @@ export function validateProfile(body) {
   return profile;
 }
 
+// 列表查询通用参数：q（关键词 ≤50 字）、分页 limit 1–100（默认 20）、offset ≥0。
+export function parseListQuery(search) {
+  const params = new URLSearchParams(search ?? '');
+  const q = (params.get('q') ?? '').trim();
+  if ([...q].length > 50) throw new AppError('invalid_filter', 400);
+  const limitRaw = params.get('limit');
+  const offsetRaw = params.get('offset');
+  const limit = limitRaw === null ? 20 : Number(limitRaw);
+  const offset = offsetRaw === null ? 0 : Number(offsetRaw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new AppError('invalid_filter', 400);
+  if (!Number.isInteger(offset) || offset < 0) throw new AppError('invalid_filter', 400);
+  return { q, limit, offset };
+}
+
+// ---- 模块4：学习资料库 ----
+export const RESOURCE_TYPES = ['教材', '知识点', '笔记', '试卷', '模拟卷', '真题', '其他'];
+const RESOURCE_TITLE_MIN = 2;
+const RESOURCE_TITLE_MAX = 100;
+const RESOURCE_DESC_MAX = 500;
+const RESOURCE_URL_MAX = 500;
+
+// 来源链接型资料登记：标题/类型/来源链接/来源名称必填，版权承诺必须勾选。
+// 文件直传待平台 Storage 适配器接通后开启：body 里出现任何 file_* 字段即拒绝，
+// 并返回 file_upload_unavailable，绝不把文件元数据写成“已上传”。
+export function validateResourceInput(body) {
+  if (body?.file_name !== undefined && body?.file_name !== null
+    || body?.file_size !== undefined && body?.file_size !== null
+    || body?.mime !== undefined && body?.mime !== null
+    || body?.storage_key !== undefined && body?.storage_key !== null) {
+    throw new AppError('file_upload_unavailable', 400);
+  }
+  const title = typeof body?.title === 'string' ? body.title.trim() : '';
+  if ([...title].length < RESOURCE_TITLE_MIN || [...title].length > RESOURCE_TITLE_MAX) {
+    throw new AppError('invalid_resource', 400);
+  }
+  const grade = body?.grade;
+  if (grade !== undefined && grade !== null && grade !== '' && !GRADES.includes(grade)) {
+    throw new AppError('invalid_resource', 400);
+  }
+  const subject = body?.subject;
+  if (subject !== undefined && subject !== null && subject !== '' && !SUBJECTS.includes(subject)) {
+    throw new AppError('invalid_resource', 400);
+  }
+  if (!RESOURCE_TYPES.includes(body?.type)) throw new AppError('invalid_resource', 400);
+  const sourceUrl = typeof body?.source_url === 'string' ? body.source_url.trim() : '';
+  if (sourceUrl.length === 0 || sourceUrl.length > RESOURCE_URL_MAX) throw new AppError('invalid_resource', 400);
+  let parsed;
+  try { parsed = new URL(sourceUrl); } catch { throw new AppError('invalid_resource', 400); }
+  if (parsed.protocol !== 'https:') throw new AppError('invalid_resource', 400);
+  const sourceName = typeof body?.source_name === 'string' ? body.source_name.trim() : '';
+  if ([...sourceName].length < 1 || [...sourceName].length > 50) throw new AppError('invalid_resource', 400);
+  const description = typeof body?.description === 'string' ? body.description.trim() : '';
+  if ([...description].length > RESOURCE_DESC_MAX) throw new AppError('invalid_resource', 400);
+  if (body?.copyright_confirmed !== true) throw new AppError('invalid_resource', 400);
+  return {
+    title,
+    grade: grade || null,
+    subject: subject || null,
+    type: body.type,
+    source_url: sourceUrl,
+    source_name: sourceName,
+    description: description === '' ? null : description,
+  };
+}
+
 export function isUuid(value) {
   return typeof value === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+}
+
+// ---- 模块5：高校与录取数据查询参数 ----
+// 全部为公开读接口；参数只做有界校验，非法值一律 400，不猜测、不放宽。
+export const PILOT_PROVINCES = ['河北', '河南'];
+export const UNIVERSITY_TYPES = ['综合', '理工', '农林', '医药', '师范', '语言', '财经', '政法', '体育', '艺术', '军事', '其他'];
+export const UNIVERSITY_LEVELS = ['本科', '专科'];
+export const UNIVERSITY_TAGS = ['双一流', '985', '211', '公办', '民办', '中外合作'];
+export const MAJOR_CATEGORIES = ['哲学', '经济学', '法学', '教育学', '文学', '历史学', '理学', '工学', '农学', '医学', '军事学', '管理学', '艺术学', '交叉学科'];
+export const SCORE_CATEGORIES = ['物理类', '历史类', '理科', '文科', '综合', '艺术类', '体育类'];
+
+// 院校代码：官方 5 位数字为主，允许 1–10 位字母数字；专业代码：教育部目录 4–6 位数字。
+export function validateUniversityCode(raw) {
+  if (typeof raw !== 'string' || !/^[0-9A-Za-z]{1,10}$/.test(raw)) throw new AppError('invalid_filter', 400);
+  return raw;
+}
+export function validateMajorCode(raw) {
+  if (typeof raw !== 'string' || !/^\d{4,6}$/.test(raw)) throw new AppError('invalid_filter', 400);
+  return raw;
+}
+
+
+function optionalEnum(params, name, allowed) {
+  const value = params.get(name);
+  if (value === null || value === '') return null;
+  if (!allowed.includes(value)) throw new AppError('invalid_filter', 400);
+  return value;
+}
+
+export function parseUniversityQuery(search) {
+  const base = parseListQuery(search);
+  const params = new URLSearchParams(search ?? '');
+  return {
+    ...base,
+    province: optionalEnum(params, 'province', PROVINCES),
+    type: optionalEnum(params, 'type', UNIVERSITY_TYPES),
+    level: optionalEnum(params, 'level', UNIVERSITY_LEVELS),
+    tag: optionalEnum(params, 'tag', UNIVERSITY_TAGS),
+  };
+}
+
+export function parseMajorQuery(search) {
+  const base = parseListQuery(search);
+  const params = new URLSearchParams(search ?? '');
+  return { ...base, category: optionalEnum(params, 'category', MAJOR_CATEGORIES) };
 }

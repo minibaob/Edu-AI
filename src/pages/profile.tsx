@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { KeyRound, LogIn, Save, User } from "lucide-react";
+import { Compass, Heart, KeyRound, LogIn, Save, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -8,10 +8,40 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useAuth } from "@/src/lib/auth";
-import { errorMessage } from "@/src/lib/api";
+import { ApiError, api, errorMessage } from "@/src/lib/api";
 import { Link } from "@/src/lib/router";
 import { GRADES, PROVINCES, SUBJECTS } from "@/src/lib/options";
 import { cn } from "@/lib/utils";
+
+// 维度中文名与模块 6 的 src/lib/assessment.ts 的 DIMENSIONS 一致；合并模块 6 后
+// 应改为直接引用那一处，避免两处维护。
+const DIMENSION_NAMES: Record<string, string> = {
+  R: "现实型",
+  I: "研究型",
+  A: "艺术型",
+  S: "社会型",
+  E: "企业型",
+  C: "常规型",
+};
+
+type FavoriteItem = {
+  id: string;
+  title: string;
+  grade: string;
+  subject: string;
+  type: string;
+  source_name: string;
+  created_at: string;
+};
+
+type AssessmentItem = {
+  id: string;
+  scores: Record<string, number>;
+  top_types: string[];
+  created_at: string;
+};
+
+type SectionState = "loading" | "ready" | "unavailable" | "error";
 
 const selectClass =
   "h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50";
@@ -31,14 +61,63 @@ export default function ProfilePage() {
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordMsg, setPasswordMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const [initializedFor, setInitializedFor] = useState<string | null>(user?.id ?? null);
-  if (user && initializedFor !== user.id) {
-    setInitializedFor(user.id);
+  // 表单初始值随登录用户变化同步（useEffect），不在渲染期间 setState。
+  const [formUserId, setFormUserId] = useState<string | null>(user?.id ?? null);
+  useEffect(() => {
+    if (!user || user.id === formUserId) return;
+    setFormUserId(user.id);
     setDisplayName(user.display_name ?? "");
     setGrade(user.grade ?? "");
     setProvince(user.province ?? "");
     setSubjects(user.subjects ?? []);
-  }
+  }, [user, formUserId]);
+
+  // 我的收藏 / 我的测评记录：接口随模块 4（资料库）与模块 6（测评）上线后
+  // 生效；接口尚未合并时返回 404，前端如实显示「尚未上线」，不编造数据。
+  const [favorites, setFavorites] = useState<FavoriteItem[]>([]);
+  const [favoritesState, setFavoritesState] = useState<SectionState>("loading");
+  const [favoritesError, setFavoritesError] = useState("");
+  const [assessments, setAssessments] = useState<AssessmentItem[]>([]);
+  const [assessmentsState, setAssessmentsState] = useState<SectionState>("loading");
+  const [assessmentsError, setAssessmentsError] = useState("");
+
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    api<{ total: number; items: FavoriteItem[] }>("/api/favorites")
+      .then((data) => {
+        if (cancelled) return;
+        setFavorites(data.items);
+        setFavoritesState("ready");
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 404) {
+          setFavoritesState("unavailable");
+        } else {
+          setFavoritesState("error");
+          setFavoritesError(errorMessage(err));
+        }
+      });
+    api<{ total: number; items: AssessmentItem[] }>("/api/assessments")
+      .then((data) => {
+        if (cancelled) return;
+        setAssessments(data.items);
+        setAssessmentsState("ready");
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 404) {
+          setAssessmentsState("unavailable");
+        } else {
+          setAssessmentsState("error");
+          setAssessmentsError(errorMessage(err));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   async function handleProfile(event: FormEvent) {
     event.preventDefault();
@@ -250,6 +329,104 @@ export default function ProfilePage() {
             </CardContent>
           </Card>
         </div>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Heart className="size-5" aria-hidden />我的收藏
+            </CardTitle>
+            <CardDescription>你在资料库里收藏的资料，只对你自己可见。</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            {favoritesState === "loading" && (
+              <p className="text-sm text-muted-foreground">正在加载收藏…</p>
+            )}
+            {favoritesState === "unavailable" && (
+              <p className="text-sm text-muted-foreground">
+                资料库模块尚未上线，收藏功能随它一起开启。
+              </p>
+            )}
+            {favoritesState === "error" && (
+              <Alert variant="destructive">
+                <AlertDescription>收藏暂时无法加载（{favoritesError}）。</AlertDescription>
+              </Alert>
+            )}
+            {favoritesState === "ready" && favorites.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                还没有收藏，在<Link to="/resources" className="text-primary underline underline-offset-2">资料库</Link>里点爱心就能收藏。
+              </p>
+            )}
+            {favoritesState === "ready" && favorites.map((fav) => (
+              <Link
+                key={fav.id}
+                to={`/resources?id=${fav.id}`}
+                className="rounded-lg border border-border p-3 hover:border-primary/40"
+              >
+                <p className="text-sm font-medium leading-snug">{fav.title}</p>
+                <p className="mt-1.5 flex flex-wrap gap-1.5">
+                  <Badge variant="secondary">{fav.grade}</Badge>
+                  <Badge variant="secondary">{fav.subject}</Badge>
+                  <Badge variant="outline">{fav.type}</Badge>
+                  <span className="text-xs text-muted-foreground">来源：{fav.source_name}</span>
+                </p>
+              </Link>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Compass className="size-5" aria-hidden />我的测评记录
+            </CardTitle>
+            <CardDescription>兴趣测评的结果记录，仅供你自己查看和回顾。</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            {assessmentsState === "loading" && (
+              <p className="text-sm text-muted-foreground">正在加载测评记录…</p>
+            )}
+            {assessmentsState === "unavailable" && (
+              <p className="text-sm text-muted-foreground">
+                测评模块尚未上线，测评记录随它一起开启。
+              </p>
+            )}
+            {assessmentsState === "error" && (
+              <Alert variant="destructive">
+                <AlertDescription>测评记录暂时无法加载（{assessmentsError}）。</AlertDescription>
+              </Alert>
+            )}
+            {assessmentsState === "ready" && assessments.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                还没有测评记录，<Link to="/assessment" className="text-primary underline underline-offset-2">去做一次兴趣测评</Link>吧。
+              </p>
+            )}
+            {assessmentsState === "ready" && assessments.map((item) => (
+              <div key={item.id} className="rounded-lg border border-border p-3">
+                <p className="text-sm font-medium">
+                  {new Date(item.created_at).toLocaleDateString("zh-CN")}
+                  <span className="ml-2 font-normal text-muted-foreground">
+                    主要倾向：
+                    {item.top_types.map((code) => `${code} · ${DIMENSION_NAMES[code] ?? code}`).join("、")}
+                  </span>
+                </p>
+                <p className="mt-1.5 flex flex-wrap gap-1.5">
+                  {Object.entries(item.scores).map(([code, score]) => (
+                    <Badge key={code} variant="secondary">
+                      {code} {score} 分
+                    </Badge>
+                  ))}
+                </p>
+              </div>
+            ))}
+            {assessmentsState === "ready" && assessments.length > 0 && (
+              <Button asChild variant="outline" className="mt-1 self-start">
+                <Link to="/assessment">重新测评</Link>
+              </Button>
+            )}
+          </CardContent>
+        </Card>
       </div>
     </div>
   );
