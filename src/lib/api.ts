@@ -33,6 +33,7 @@ export async function api<T>(
 
 const ERROR_MESSAGES: Record<string, string> = {
   network: "无法连接服务器，请检查网络后重试",
+  sites_gateway_login_required: "当前环境未携带平台登录态（应用内预览常见）。请在已登录 Qoder 的浏览器中打开站点地址后重试",
   invalid_username: "用户名需为 2–20 个字符，可用中文、字母、数字、下划线或连字符",
   invalid_password: "密码至少 8 个字符",
   invalid_profile: "资料格式不正确，请检查年级、省份和学科选择",

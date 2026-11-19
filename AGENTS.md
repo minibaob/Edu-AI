@@ -141,3 +141,5 @@ node --test dev/check.mjs # 后端契约测试
 | 控制面 | universities/admission_scores/enrollment_plans/data_meta 迁移应用 | passed | clientMigrationId module5-henan-tables-v1，操作 succeeded |
 | 线上 | 发布含模块5 的版本 | passed | 发布操作 succeeded/committed，published=true（actionId 7c9e1f3a-5b2d-4a8e-9c1f-2e3d4a5b6c7d） |
 | 线上数据 | 所有者导入三个 CSV 后线上查询验证 | pending | 线上数据库为空；selected 访问需所有者浏览器登录；导入顺序 ①院校②录取③计划 |
+
+注：应用内预览面板的 fetch 不携带平台登录态，网关返回 401 sites_gateway_login_required（网关层拦截不进函数日志），属预期；线上验收必须在已登录 Qoder 的浏览器中进行。前端已对该错误码显示明确引导文案。
