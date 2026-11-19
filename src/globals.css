@@ -165,3 +165,78 @@ body {
   background-clip: text;
   color: transparent;
 }
+
+/* 资料在线预览的 markdown 排版（复用品牌变量，公式 KaTeX 横向可滚动） */
+.resource-md {
+  line-height: 1.85;
+  font-size: calc(0.9375rem * var(--site-type));
+  overflow-wrap: break-word;
+}
+.resource-md > :first-child { margin-top: 0; }
+.resource-md > :last-child { margin-bottom: 0; }
+.resource-md h1 {
+  font-size: 1.45em;
+  font-weight: 700;
+  margin: 1.5em 0 0.7em;
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid var(--border);
+}
+.resource-md h2 {
+  font-size: 1.22em;
+  font-weight: 700;
+  margin: 1.5em 0 0.6em;
+  padding-left: 0.6em;
+  border-left: 4px solid var(--site-accent);
+}
+.resource-md h3 {
+  font-size: 1.06em;
+  font-weight: 600;
+  margin: 1.2em 0 0.5em;
+  color: color-mix(in oklab, var(--site-accent) 70%, var(--foreground));
+}
+.resource-md h4, .resource-md h5, .resource-md h6 { font-weight: 600; margin: 1em 0 0.4em; }
+.resource-md p { margin: 0.65em 0; }
+.resource-md ul, .resource-md ol { margin: 0.6em 0; padding-left: 1.6em; }
+.resource-md ul { list-style: disc; }
+.resource-md ol { list-style: decimal; }
+.resource-md li { margin: 0.3em 0; }
+.resource-md li::marker { color: var(--site-accent); }
+.resource-md strong { font-weight: 600; }
+.resource-md blockquote {
+  margin: 0.8em 0;
+  padding: 0.5em 0.9em;
+  border-left: 4px solid var(--edu-violet);
+  background: var(--muted);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--muted-foreground);
+}
+.resource-md code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.1em 0.35em;
+}
+.resource-md pre {
+  overflow-x: auto;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.9em 1em;
+  margin: 0.8em 0;
+}
+.resource-md pre code { background: none; border: 0; padding: 0; }
+.resource-md table { border-collapse: collapse; margin: 0.9em 0; max-width: 100%; display: block; overflow-x: auto; }
+.resource-md th, .resource-md td { border: 1px solid var(--border); padding: 0.45em 0.7em; text-align: left; }
+.resource-md th { background: var(--secondary); font-weight: 600; }
+.resource-md hr { border: 0; border-top: 1px solid var(--border); margin: 1.4em 0; }
+.resource-md a { color: var(--primary); text-decoration: underline; }
+.resource-md img { max-width: 100%; border-radius: var(--radius); }
+.resource-md .katex { font-size: 1.06em; }
+.resource-md .katex-display {
+  margin: 0.8em 0;
+  padding: 0.2em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}

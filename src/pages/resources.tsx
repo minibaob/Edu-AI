@@ -1,13 +1,14 @@
-// 模块4 学习资料库：浏览（搜索 + 年级/学科/类型筛选 + 分页）、详情、收藏、
+// 模块4 学习资料库：浏览（搜索 + 年级/学科/类型筛选 + 分页）、详情（内容在线预览）、收藏、
 // 登记来源链接型资料与文件直传（平台 Storage 签名上传，服务端回读校验后才登记）。
 // 没有资料时展示空状态，不填充虚构资料。版权承诺为必填项。
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import {
   ArrowLeft,
   BookOpen,
   Download,
   ExternalLink,
+  Eye,
   Heart,
   LogIn,
   Search,
@@ -37,7 +38,11 @@ import {
   unfavoriteResource,
 } from "@/src/lib/resources";
 import type { Resource } from "@/src/lib/resources";
+import { siteFilePath } from "@/src/lib/resource-preview";
 import { cn } from "@/lib/utils";
+
+// 预览器含 markdown/公式渲染库，按需懒加载，不拖慢列表首屏。
+const ResourceViewer = lazy(() => import("@/src/components/resource-viewer"));
 
 const selectClass =
   "h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50";
@@ -280,6 +285,9 @@ export default function ResourcesPage() {
                 <Badge variant="outline">{detail.type}</Badge>
               </div>
               {detail.description && <p className="leading-relaxed">{detail.description}</p>}
+              <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+                <ResourceViewer resource={detail} loggedIn={!!user} />
+              </Suspense>
               <p className="text-muted-foreground">
                 来源：{detail.source_name}
                 {detail.source_url && (
@@ -291,7 +299,7 @@ export default function ResourcesPage() {
                       target="_blank"
                       rel="noreferrer"
                     >
-                      打开来源 <ExternalLink className="size-3.5" aria-hidden />
+                      {siteFilePath(detail.source_url) ? "原始文件" : "打开来源"} <ExternalLink className="size-3.5" aria-hidden />
                     </a>
                   </>
                 )}
@@ -609,12 +617,23 @@ export default function ResourcesPage() {
                           来源：{item.source_name}
                         </span>
                         <span className="flex shrink-0 items-center gap-2">
-                          {item.has_file && (
-                            <Badge variant="secondary" className="gap-1">
-                              <Download className="size-3" aria-hidden />附件
-                            </Badge>
-                          )}
-                          {item.source_url && (
+                          {item.has_file ? (
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                              onClick={() => navigate(`/resources?id=${encodeURIComponent(item.id)}`)}
+                            >
+                              <Eye className="size-3" aria-hidden /> 在线预览
+                            </button>
+                          ) : siteFilePath(item.source_url) ? (
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                              onClick={() => navigate(`/resources?id=${encodeURIComponent(item.id)}`)}
+                            >
+                              <BookOpen className="size-3" aria-hidden /> 在线阅读
+                            </button>
+                          ) : item.source_url ? (
                             <a
                               className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
                               href={item.source_url}
@@ -623,7 +642,7 @@ export default function ResourcesPage() {
                             >
                               打开来源 <ExternalLink className="size-3" aria-hidden />
                             </a>
-                          )}
+                          ) : null}
                         </span>
                       </div>
                     </CardContent>
