@@ -1,64 +1,58 @@
-# Qoder Sites React starter
+# EduAI 智学未来
 
-A React, TypeScript, Vite and Tailwind frontend with a bundled Shadcn component catalog. Vite produces static files in `dist/`. Server behavior belongs in the optional Qoder Sites Function, not a Node or framework server.
+AI-Powered Learning & Growth Platform · 让学习更智能，让成长有方向。
 
-## Develop
+面向高一至高三学生的学习资源、升学信息查询、兴趣探索与个人成长管理平台，帮助学生发现潜力、降低教育信息差。开发团队为大学生开发者；网站文案面向高中生用户。
 
-Use a Node version accepted by `package.json` (`^22.13.0 || >=24.0.0`). Select an installed compatible runtime and keep it selected for installation, development and build:
+**当前为第一阶段（无 AI 版本）**：不接入任何模型 API，不做 AI 聊天、AI 生成试题、AI 志愿推荐等功能。兴趣测评与性格倾向测评全部由固定规则计分（霍兰德 RIASEC 简化版 / 自研 MBTI 风格简化版），不调用 AI。
 
-```sh
-npm ci
-npm run dev
+## 技术栈
+
+- 前端：React 19 + Vite + Tailwind 4 + shadcn 组件（`components/ui/`），静态构建输出 `dist/`
+- 路由：自研轻量哈希路由 `src/lib/router.tsx`（`#/resources` 等）
+- 后端：Qoder Sites 单个 `app` Edge Function（Deno，`functions/index.ts`），业务路由在 `functions/router.mjs`，前端同源调用 `/functions/v1/app/api/...`
+- 数据库：平台托管 PostgreSQL，Function 内通过注入适配器访问；表结构脚本在 `db/`，经平台审核迁移流程应用；浏览器不直接访问数据库
+- 认证：应用自持用户名/密码（PBKDF2 派生、数据库会话摘要、`__Host-` Cookie、固定来源 CSRF 校验、数据库限流）
+- 文件存储：平台 Storage（资料文件直传尚未开放，当前仅来源链接型登记）
+
+## 常用命令
+
+```bash
+npm ci                    # 安装依赖（Node 22.13+ 或 24+）
+npm run dev               # 本地开发 http://127.0.0.1:5173
+npm run build             # 类型检查 + 静态构建
+node --test dev/check.mjs # 后端契约测试（凭据无关假数据库）
+node dev/server-local.mjs # 本地浏览器演练后端（配合 npm run dev 代理）
 ```
 
-Use the loopback URL printed by Vite. Edit `src/App.tsx`, `src/globals.css` and the title/description in `index.html`. Replace the sample page with the requested product before presenting a first meaningful preview. Import existing UI primitives from `@/components/ui/<component>` and compose them for the site's design. The neutral starter theme is a starting point, not the finished visual direction.
+## 目录
 
-For production output:
+- `src/pages/` 前端页面（首页仪表盘、资料库、高校查询、测评、个人中心、登录注册、管理员导入）
+- `functions/` 后端路由与业务模块（认证、测评、高校数据、资料库）
+- `db/` 表结构、平台迁移脚本、官方数据导入模板与校验工具
+- `dev/` 契约测试、假数据库、本地演练服务、官方 Excel 转换工具
+- `AGENTS.md` 开发指令与进度（任何 AI 助手与开发者必读）
 
-```sh
-npm run build
-npm run preview
-```
+## 模块状态
 
-The build fixes `NODE_ENV=production` before loading Vite, independently of the terminal environment. It checks the frontend and bundled component types and emits `dist/index.html` and assets. `npm run preview` serves this output locally. Reuse passing checks while source is unchanged; no additional unit-test suite or browser QA is required by the template.
+| 模块 | 状态 |
+| --- | --- |
+| 1 骨架 / 设计系统 / 路由 / 首页 | 完成 |
+| 2 用户系统 | 完成 |
+| 3 首页真实数据 | 完成（统计真实计数，触顶如实显示） |
+| 4 学习资料库 | 完成（来源链接型登记 + 收藏；文件直传待开放） |
+| 5 高校与录取数据 | 河南完成并已导入线上；河北待官方数据 |
+| 6 兴趣测评 + 性格倾向测评 | 完成（固定规则，含免责声明） |
+| 7 个人中心 | 完成 |
+| 8 云端部署 | 已上线（selected 访问） |
 
-## Optional Function
+## 数据与安全原则
 
-The default page is entirely static and does not call a Function. For server behavior, adapt the public, credential-free example in `functions/handler.ts`. `functions/index.ts` is the Deno deployment entry point. Check `deno --version` before using a separate terminal for:
+- 不编造任何高校或录取数据；缺失字段一律显示「暂无数据」；真实数据来自各省教育考试院等官方渠道并标注来源。
+- 演示数据必须带明显「演示数据」标签，与真实数据严格区分。
+- 密钥不进源码与仓库；数据库凭据由平台注入 Function；会话令牌明文不落库、不记录日志；口令只存 PBKDF2 派生结果。
+- 资料归属只来自已验证会话；上传/登记限制类型与大小并要求版权承诺；最小化收集个人信息（年级/省份/学科全部选填，不强制邮箱手机号）。
 
-```sh
-npm run check:function
-npm run dev:function
-```
+## 协作
 
-If Deno is unavailable, the static frontend can still build and run. Keep Function validation pending until Deno or an equivalent existing Function checker is available; `npm run build` checks the frontend only. Local proxy requests also need a running compatible Function server.
-
-The local service binds to `127.0.0.1:8000`; Vite development and built preview proxy `/functions/v1/app` to it, preserving the path. Probe with an available HTTP tool or Node `fetch`; with `curl` installed, for example:
-
-```sh
-curl --fail 'http://127.0.0.1:5173/functions/v1/app?name=Visitor'
-```
-
-Use Vite's actual port if it differs. The same frontend request after deployment is routed by Qoder Sites. Local proxy configuration is not production routing. Keep local-only servers and fixtures in `dev/`, outside both publication directories. The included Function has no dependencies; add self-contained runtime imports as required. Frontend npm dependencies are not automatically installed in Functions.
-
-## Publish with Qoder Sites
-
-Open a local conversation in this project and follow the `sites-hosting` skill. Workspace registration is optional. Use the directory returned by `get_context` with:
-
-- `webDirectory: "dist"` after the build.
-- `spa: false` for the default single page; use `true` when adding client-side deep routes that need fallback.
-- `functionDirectory: "functions"` only if the application uses the Function. Omit it for static-only delivery.
-
-The Sites tools prepare artifacts and generate the publication descriptor; publish completed hosted work by default, unless the user explicitly requests a preview first or defers publication. Do not upload the project root, `node_modules`, `dev`, or source as the web artifact. A successful build or release does not prove an external integration works.
-
-For a new database-backed React page, follow the installed `sites-building` Skill's `references/function-backend.md`. Its assembled `assets/function-backend/` example includes `Notes.tsx`, Function routes and a schema using the platform's private database credentials. For a runnable records-and-attachments workbench, use that Skill's `references/records-example.md`; its setup command assembles a new project from this starter and keeps local fixtures outside deployment outputs. Preserve and adapt its application identity and ownership checks before exposing private records. `references/database.md`, `assets/database-react/App.tsx` and `assets/database-function/` are for existing legacy allocations only. These optional assets stay in the Skill rather than being copied into every static project.
-
-For database or Storage, follow the corresponding `sites-building` references and `sites-management` capability workflow. For AI, follow `sites-build-agent-app` and keep Cloud Agents access in the Function. Application credentials belong in server-side Sites Settings; frontend environment variables are public. This starter does not implement visitor login, database permissions, Cloud resource coordination or QCA sessions; add those only for the requested feature using the existing skills.
-
-See `PROVENANCE.md` and `vendor/` for source attribution and the preserved stylesheet license.
-
-After copying the starter, rename `gitignore.template` to `.gitignore` before installing dependencies. This keeps the file available in npm and bundled CLI resources.
-
-## Design workbench
-
-On Desktop, call `open_design_workbench` with the project name and design registration (pages and implemented Nudge capabilities). The tool creates the single `.站点名称.qoder.site` entry; update it through `update_design_workbench`. The starter deliberately contains no fixed-name project entry. Components consume `--site-*` variables defined in the existing application stylesheet. The workbench only previews temporary overrides and attaches requested changes to chat. The Agent implements changes and prepares publication artifacts before reporting completion; no dedicated theme file is required.
+`main` 保持稳定，模块开发走 `feature/<name>` 分支 + Pull Request；发布统一由仓库所有者（minibaob）在其 Qoder 账号下操作。详见 `AGENTS.md`。
