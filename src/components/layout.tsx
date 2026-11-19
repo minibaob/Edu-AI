@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { BookOpen, Building2, Compass, GraduationCap, Home, LogOut, User } from "lucide-react";
+import { BookOpen, Building2, Compass, GraduationCap, Home, LogOut, Upload, User } from "lucide-react";
 import { Link, navigate, useRoute } from "@/src/lib/router";
 import { useAuth } from "@/src/lib/auth";
 import { cn } from "@/lib/utils";
@@ -14,6 +14,9 @@ const NAV_ITEMS = [
 export function Layout({ children }: { children: ReactNode }) {
   const route = useRoute();
   const { user, logout } = useAuth();
+  const navItems = user?.role === "admin"
+    ? [...NAV_ITEMS, { to: "/admin/import", label: "数据导入", icon: Upload }]
+    : NAV_ITEMS;
 
   async function handleLogout() {
     try {
@@ -40,7 +43,7 @@ export function Layout({ children }: { children: ReactNode }) {
             </span>
           </Link>
           <nav className="hidden flex-1 items-center gap-1 md:flex" aria-label="主导航">
-            {NAV_ITEMS.map((item) => (
+            {navItems.map((item) => (
               <Link
                 key={item.to}
                 to={item.to}
@@ -90,7 +93,7 @@ export function Layout({ children }: { children: ReactNode }) {
           className="scrollbar-none flex gap-1 overflow-x-auto border-t border-border px-3 py-1.5 md:hidden"
           aria-label="主导航（移动端）"
         >
-          {NAV_ITEMS.map((item) => (
+          {navItems.map((item) => (
             <Link
               key={item.to}
               to={item.to}

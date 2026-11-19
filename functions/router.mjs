@@ -1,4 +1,4 @@
-// EduAI 应用路由：注册 / 登录 / 退出 / 当前用户 / 个人资料 / 修改密码。
+// EduAI 应用路由：注册 / 登录 / 退出 / 当前用户 / 个人资料 / 修改密码 / 兴趣测评。
 // 应用身份一律来自本应用自己的会话校验（数据库中的会话摘要），
 // 绝不使用 ctx.user、平台身份、Host 头或浏览器提交的 owner_id。
 import { AppError, applicationPath, errorJson, json, readJson, requireTrustedOrigin, rows } from './http.mjs';
@@ -6,6 +6,12 @@ import { canonicalUsername, validatePassword, validateProfile } from './validate
 import { hashPassword, verifyPassword, verifyPasswordAgainstDummy } from './passwords.mjs';
 import { SESSION_TTL_MS, clearSessionCookie, createSession, revokeSession, sessionCookie, validateSession } from './sessions.mjs';
 import { consume } from './limiter.mjs';
+import { OPTIONS, QUESTIONS, computeResult, publicResult, validateAnswers } from './assessment.mjs';
+import {
+  OPTIONS as MBTI_OPTIONS, QUESTIONS as MBTI_QUESTIONS,
+  computeResult as computeMbti, publicResult as mbtiPublicResult, validateAnswers as validateMbtiAnswers,
+} from './mbti.mjs';
+import { importChunk, listUniversities, universityDetail, updateMeta } from './universities.mjs';
 
 const SESSION_TTL_SECONDS = Math.floor(SESSION_TTL_MS / 1000);
 const encoder = new TextEncoder();
@@ -32,6 +38,14 @@ async function requireSession(db, request) {
   const result = await validateSession(db, request);
   if (result.state !== 'valid') throw new SessionRequired(result.state);
   return result.session;
+}
+
+// 管理员 = 应用会话 + 数据库 role=admin（由所有者通过平台工具授予）；不使用平台身份。
+async function requireAdmin(db, request) {
+  const session = await requireSession(db, request);
+  const user = await loadUser(db, session.userId);
+  if (user.role !== 'admin') throw new AppError('admin_required', 403);
+  return session;
 }
 
 function publicUser(row) {
@@ -173,6 +187,38 @@ async function changePassword(db, request, session) {
   return json({ ok: true });
 }
 
+async function submitAssessment(db, request, session, kind, validate, compute, toPublic) {
+  const body = await readJson(request);
+  const answers = validate(body);
+  const { scores, code } = compute(answers);
+  const id = crypto.randomUUID();
+  let created;
+  try {
+    created = rows(await db.from('assessments').insertIfAbsent({
+      id,
+      user_id: session.userId,
+      kind,
+      answers: JSON.stringify(answers),
+      scores: JSON.stringify(scores),
+      code,
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'id' }).select('id,kind,code,scores,created_at'));
+  } catch (error) {
+    // 数据层明确拒绝保留 database_unavailable；响应丢失等未知结果不重放、不谎报成功。
+    if (error instanceof AppError) throw error;
+    return errorJson('assessment_unconfirmed', 503);
+  }
+  if (created.length !== 1) return errorJson('assessment_unconfirmed', 503);
+  return json({ result: toPublic(created[0]) }, 201);
+}
+
+async function latestAssessment(db, session, kind, toPublic) {
+  const found = rows(await db.from('assessments').select('id,kind,code,scores,created_at')
+    .eq('user_id', session.userId).eq('kind', kind)
+    .order('created_at', { ascending: false }).limit(1));
+  return json({ result: found.length === 1 ? toPublic(found[0]) : null });
+}
+
 async function route(db, request, origin) {
   requireTrustedOrigin(request, origin);
   const path = applicationPath(request);
@@ -197,7 +243,63 @@ async function route(db, request, origin) {
     return changePassword(db, request, session);
   }
 
-  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health'].includes(path)) {
+  if (path === '/api/assessment/questions' && request.method === 'GET') {
+    await requireSession(db, request);
+    return json({ questions: QUESTIONS.map(({ id, text }) => ({ id, text })), options: OPTIONS });
+  }
+
+  if (path === '/api/assessment/submit' && request.method === 'POST') {
+    const session = await requireSession(db, request);
+    return submitAssessment(db, request, session, 'riasec', validateAnswers, computeResult, publicResult);
+  }
+
+  if (path === '/api/assessment/latest' && request.method === 'GET') {
+    const session = await requireSession(db, request);
+    return latestAssessment(db, session, 'riasec', publicResult);
+  }
+
+  if (path === '/api/mbti/questions' && request.method === 'GET') {
+    await requireSession(db, request);
+    return json({ questions: MBTI_QUESTIONS.map(({ id, text, a, b }) => ({ id, text, a, b })), options: MBTI_OPTIONS });
+  }
+
+  if (path === '/api/mbti/submit' && request.method === 'POST') {
+    const session = await requireSession(db, request);
+    return submitAssessment(db, request, session, 'mbti', validateMbtiAnswers, computeMbti, mbtiPublicResult);
+  }
+
+  if (path === '/api/mbti/latest' && request.method === 'GET') {
+    const session = await requireSession(db, request);
+    return latestAssessment(db, session, 'mbti', mbtiPublicResult);
+  }
+
+  // 模块5：匿名只读查询。
+  if (path === '/api/universities' && request.method === 'GET') return listUniversities(db);
+  const detailMatch = path.match(/^\/api\/universities\/([A-Za-z0-9]{1,32})$/);
+  if (detailMatch && request.method === 'GET') {
+    const yearParam = new URL(request.url).searchParams.get('year');
+    let planYear = null;
+    if (yearParam !== null) {
+      if (!/^\d{4}$/.test(yearParam)) throw new AppError('invalid_input', 400);
+      planYear = Number(yearParam);
+    }
+    return universityDetail(db, detailMatch[1], planYear);
+  }
+
+  // 模块5：管理员导入（应用会话 role=admin）。
+  if (path === '/api/admin/import' && request.method === 'POST') {
+    await requireAdmin(db, request);
+    return importChunk(db, request);
+  }
+  if (path === '/api/admin/meta' && request.method === 'POST') {
+    await requireAdmin(db, request);
+    return updateMeta(db, request);
+  }
+
+  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health',
+    '/api/assessment/questions', '/api/assessment/submit', '/api/assessment/latest',
+    '/api/mbti/questions', '/api/mbti/submit', '/api/mbti/latest',
+    '/api/universities', '/api/admin/import', '/api/admin/meta'].includes(path)) {
     throw new AppError('method_not_allowed', 405);
   }
   throw new AppError('not_found', 404);

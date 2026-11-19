@@ -50,6 +50,11 @@ const ERROR_MESSAGES: Record<string, string> = {
   password_unconfirmed: "密码修改未确认，请先尝试用新密码登录",
   payload_too_large: "提交内容过大",
   invalid_input: "提交内容不正确",
+  invalid_answers: "答题不完整或格式不正确，请检查后再提交",
+  assessment_unconfirmed: "提交结果未确认，请先刷新查看是否已保存，勿重复提交",
+  admin_required: "此操作需要管理员权限",
+  not_found: "未找到该院校",
+  meta_unconfirmed: "展示元数据保存未确认，请重试",
 };
 
 export function errorMessage(error: unknown): string {
@@ -58,3 +63,44 @@ export function errorMessage(error: unknown): string {
   }
   return "操作失败，请稍后重试";
 }
+
+// ===== 模块5：高校与录取数据 =====
+export type UniversityIndexItem = { code: string; name: string };
+export type Facets = { provinces?: string[]; years?: number[]; categories?: string[]; batches?: string[] };
+export type Counts = { universities: number; admission_scores: number; enrollment_plans: number };
+export type UniversitiesResponse = {
+  universities: UniversityIndexItem[];
+  score_facets: Facets;
+  plan_facets: Facets;
+  counts: Counts;
+};
+export type University = {
+  code: string; name: string; province: string | null; city: string | null;
+  type: string | null; level: string | null; tags: string | null;
+  website: string | null; source: string; note: string | null;
+};
+export type ScoreRow = {
+  id: string; university_code: string; school_name: string | null; province: string;
+  year: number; category: string; batch: string; subject_requirement: string | null;
+  min_score: string | null; min_rank: number | null; admitted_count: number | null;
+  source: string; note: string | null;
+};
+export type PlanRow = {
+  id: string; university_code: string; school_name: string; province: string;
+  year: number; major_code: string | null; major_name: string; batch: string | null;
+  subject_requirement: string | null; plan_count: number | null; tuition: number | null;
+  source: string; note: string | null;
+};
+export type UniversityDetail = {
+  university: University; scores: ScoreRow[]; plans: PlanRow[];
+  plan_year: number | null; plan_years: number[];
+};
+
+export const getUniversities = () => api<UniversitiesResponse>("/api/universities");
+export const getUniversityDetail = (code: string, year?: number) =>
+  api<UniversityDetail>(`/api/universities/${code}${year ? `?year=${year}` : ""}`);
+export const postImportChunk = (body: {
+  table: string; run_id: string; chunk_index: number; rows: unknown[];
+}) => api<{ ok: boolean; received: number; inserted: number }>("/api/admin/import", { method: "POST", body });
+export const postMeta = (key: string, value: unknown) =>
+  api<{ ok: boolean }>("/api/admin/meta", { method: "POST", body: { key, value } });

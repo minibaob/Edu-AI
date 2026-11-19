@@ -28,30 +28,47 @@ export function createFakeDb(control = { mode: 'ok', dropTable: null, rejectTabl
   function builder(table, mode, values) {
     const filters = [];
     let columns = '*';
-    let orderBy = null, maxRows = Infinity, execution;
+    let orderBy = null, orderAscending = true, maxRows = Infinity, execution;
     const run = () => {
       const list = rows(table);
       const match = (row) => filters.every(([key, value]) => row[key] === value);
 
       if (mode === 'read') {
         const selected = list.filter(match);
-        if (orderBy) selected.sort((a, b) => String(a[orderBy]).localeCompare(String(b[orderBy])));
+        if (orderBy) {
+          selected.sort((a, b) => {
+            const cmp = String(a[orderBy]).localeCompare(String(b[orderBy]));
+            return orderAscending ? cmp : -cmp;
+          });
+        }
         return { data: selected.slice(0, maxRows).map((row) => pick(row, columns)), error: null };
       }
 
       control.writes.push(table);
 
       if (mode === 'insert') {
+        const incoming = Array.isArray(values.row) ? values.row : [values.row];
         const unique = (values.onConflict ?? '').split(',').map((c) => c.trim()).filter(Boolean);
-        if (unique.length && list.some((row) => unique.every((key) => row[key] === values.row[key]))) {
-          return { data: [], error: null };
+        const keyOf = (row) => unique.map((k) => String(row[k])).join('|');
+        // 每次写入构建一次键集合，避免逐行全表扫描（大批量导入时为 O(n²)）。
+        const existingKeys = unique.length > 0 ? new Set(list.map(keyOf)) : null;
+        const batchKeys = new Set();
+        const batch = [];
+        for (const row of incoming) {
+          if (existingKeys) {
+            const key = keyOf(row);
+            if (existingKeys.has(key) || batchKeys.has(key)) continue;
+            batchKeys.add(key);
+          }
+          batch.push(row);
         }
+        if (batch.length === 0) return { data: [], error: null };
         const writeMode = takeMode(table);
         if (writeMode === 'reject') return { data: null, error: { code: 'write_failed', status: 409 } };
         // 'drop'：数据已提交，只是响应没回来。
-        list.push({ ...values.row });
+        for (const row of batch) list.push({ ...row });
         if (writeMode === 'drop') throw new Error('simulated response loss');
-        return { data: [pick(values.row, columns)], error: null };
+        return { data: batch.map((row) => pick(row, columns)), error: null };
       }
 
       const writeMode = takeMode(table);
@@ -65,7 +82,7 @@ export function createFakeDb(control = { mode: 'ok', dropTable: null, rejectTabl
     const chain = {
       eq(key, value) { filters.push([key, value]); return chain; },
       limit(count) { maxRows = count; return chain; },
-      order(name) { orderBy = String(name); return chain; },
+      order(name, options) { orderBy = String(name); orderAscending = options?.ascending !== false; return chain; },
       select(names) { if (typeof names === 'string') columns = names; return chain; },
       then(resolve, reject) { execution ??= Promise.resolve().then(run); return execution.then(resolve, reject); },
     };

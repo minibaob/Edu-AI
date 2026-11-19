@@ -16,8 +16,8 @@ const CURRENT_YEAR = new Date().getFullYear();
 const FILES = {
   'universities.csv': ['院校代码', '学校名称', '所在省份', '所在城市', '办学类型', '办学层次', '标签', '招生网址', '数据来源', '备注'],
   'majors.csv': ['专业代码', '专业名称', '学科门类', '学制', '授予学位', '数据来源', '备注'],
-  'admission_scores.csv': ['院校代码', '省份', '年份', '科类', '批次', '选科要求', '最低分', '最低位次', '录取人数', '数据来源', '备注'],
-  'enrollment_plans.csv': ['院校代码', '省份', '年份', '专业代码', '专业名称', '批次', '选科要求', '计划数', '学费', '数据来源', '备注'],
+  'admission_scores.csv': ['院校代码', '省份', '年份', '科类', '批次', '选科要求', '最低分', '最低位次', '录取人数', '数据来源', '备注', '学校名称'],
+  'enrollment_plans.csv': ['院校代码', '省份', '年份', '专业代码', '专业名称', '批次', '选科要求', '计划数', '学费', '数据来源', '备注', '学校名称'],
 };
 
 function parseCsv(text) {
@@ -51,6 +51,13 @@ const warn = (file, line, message) => warnings.push(`${file} 第${line}行：${m
 
 function intInRange(value, min, max) {
   if (!/^\d+$/.test(value)) return false;
+  const n = Number(value);
+  return n >= min && n <= max;
+}
+
+// 艺术/体育类综合分带小数（官方公布口径），最多两位小数。
+function scoreInRange(value, min, max) {
+  if (!/^\d+(\.\d{1,2})?$/.test(value)) return false;
   const n = Number(value);
   return n >= min && n <= max;
 }
@@ -117,9 +124,10 @@ for (const row of universities) {
   const f = 'universities.csv', l = row.__line;
   checkRequired(f, l, '院校代码', row['院校代码']);
   checkRequired(f, l, '学校名称', row['学校名称']);
-  checkEnum(f, l, '所在省份', row['所在省份'], PROVINCES, true);
-  checkEnum(f, l, '办学类型', row['办学类型'], UNIVERSITY_TYPES, true);
-  checkEnum(f, l, '办学层次', row['办学层次'], UNIVERSITY_LEVELS, true);
+  // 官方分数文件往往不含院校属性字段，缺失时网站显示「暂无数据」，故改为选填。
+  checkEnum(f, l, '所在省份', row['所在省份'], PROVINCES, false);
+  checkEnum(f, l, '办学类型', row['办学类型'], UNIVERSITY_TYPES, false);
+  checkEnum(f, l, '办学层次', row['办学层次'], UNIVERSITY_LEVELS, false);
   checkRequired(f, l, '数据来源', row['数据来源']);
   if (row['标签'] !== '') {
     for (const tag of row['标签'].split('|')) {
@@ -162,7 +170,7 @@ for (const row of scores) {
   checkEnum(f, l, '科类', row['科类'], SCORE_CATEGORIES, true);
   checkRequired(f, l, '批次', row['批次']);
   checkRequired(f, l, '数据来源', row['数据来源']);
-  checkInt(f, l, '最低分', row['最低分'], 0, 750, false);
+  if (row['最低分'] !== '' && !scoreInRange(row['最低分'], 0, 750)) fail(f, l, `最低分 应为 0–750、最多两位小数（当前「${row['最低分']}」）`);
   checkInt(f, l, '最低位次', row['最低位次'], 1, 10000000, false);
   checkInt(f, l, '录取人数', row['录取人数'], 0, 100000, false);
   if (row['院校代码'] !== '' && !universityCodes.has(row['院校代码'])) fail(f, l, `院校代码「${row['院校代码']}」未在 universities.csv 中登记`);
@@ -179,17 +187,21 @@ for (const row of plans) {
   checkEnum(f, l, '省份', row['省份'], PILOT_PROVINCES, true);
   checkInt(f, l, '年份', row['年份'], 2000, CURRENT_YEAR, true);
   checkRequired(f, l, '专业名称', row['专业名称']);
+  checkRequired(f, l, '学校名称', row['学校名称']);
   checkRequired(f, l, '数据来源', row['数据来源']);
   checkInt(f, l, '计划数', row['计划数'], 0, 100000, false);
   checkInt(f, l, '学费', row['学费'], 0, 1000000, false);
-  if (row['院校代码'] !== '' && !universityCodes.has(row['院校代码'])) fail(f, l, `院校代码「${row['院校代码']}」未在 universities.csv 中登记`);
-  if (row['专业代码'] !== '' && !majorCodes.has(row['专业代码'])) fail(f, l, `专业代码「${row['专业代码']}」未在 majors.csv 中登记`);
+  // 计划表用省报考代码（与录取表国标代码不同源），跨表关联按学校名称。
+  if (row['学校名称'] !== '' && !universityNames.has(row['学校名称'])) fail(f, l, `学校名称「${row['学校名称']}」未在 universities.csv 中登记`);
+  if (row['专业代码'] !== '' && majorCodes.size > 0 && !majorCodes.has(row['专业代码'])) fail(f, l, `专业代码「${row['专业代码']}」未在 majors.csv 中登记`);
   const key = [row['院校代码'], row['省份'], row['年份'], row['专业代码'] || row['专业名称'], row['批次']].join('|');
-  if (row['院校代码'] !== '' && planKeys.has(key)) fail(f, l, `招生计划重复（同院校+省份+年份+专业+批次）：${key}`);
+  // 官方计划中同专业同批次可能因办学地点/合作方不同而多行，重复只警告不报错。
+  if (row['院校代码'] !== '' && planKeys.has(key)) warn(f, l, `招生计划键重复（同院校+省份+年份+专业+批次，可能为不同办学地点）：${key}`);
   planKeys.add(key);
 }
 
-for (const message of warnings) console.log(`警告 ${message}`);
+for (const message of warnings.slice(0, 20)) console.log(`警告 ${message}`);
+if (warnings.length > 20) console.log(`……其余 ${warnings.length - 20} 条警告省略（见合计）`);
 for (const message of errors) console.log(`错误 ${message}`);
 console.log(`\n合计：高校 ${universities.length} 行，专业 ${majors.length} 行，录取 ${scores.length} 行，计划 ${plans.length} 行；错误 ${errors.length}，警告 ${warnings.length}`);
 if (errors.length > 0) {
