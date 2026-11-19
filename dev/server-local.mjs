@@ -28,6 +28,15 @@ const server = http.createServer(async (req, res) => {
   for await (const chunk of req) chunks.push(chunk);
   const body = Buffer.concat(chunks);
 
+  // 仅本地演练：按用户名授予 admin（生产由所有者通过平台工具授予，不存在此入口）。
+  if (req.url === '/functions/v1/app/__local_admin__' && req.method === 'POST') {
+    const { username } = JSON.parse(body.toString('utf-8') || '{}');
+    await db.from('users').update({ role: 'admin' }).eq('username', String(username));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
   // 假 Storage 的签名 URL：PUT 存入内存对象表，GET 按存储的 MIME 回传字节。
   if (req.url.startsWith(STORAGE_PREFIX)) {
     const path = decodeURIComponent(req.url.slice(STORAGE_PREFIX.length));

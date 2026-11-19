@@ -48,6 +48,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   unsupported_file_type: "不支持该文件类型，可上传 PDF、Word、PPT、Excel、文本、图片或 ZIP",
   file_too_large: "文件超过 10MB 上限，请压缩或拆分后再上传",
   file_forbidden: "不能登记他人上传的文件",
+  resource_forbidden: "只能删除自己上传的资料",
   file_validation_failed: "文件校验未通过（大小或类型不符），请重新上传",
   file_not_found: "该资料没有可下载的文件",
   storage_unavailable: "文件服务暂时不可用，请稍后重试",
