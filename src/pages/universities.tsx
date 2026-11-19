@@ -93,7 +93,7 @@ function ListView() {
             <span>· {data.counts.admission_scores} 条录取记录</span>
             <span>· {data.counts.enrollment_plans} 条招生计划</span>
             <span className="rounded-full bg-accent px-2.5 py-0.5 text-xs text-accent-foreground">
-              试点省份：河南（河北数据整理中）
+              试点省份：{(data.score_facets.provinces ?? []).join('、') || '暂无数据'}
             </span>
           </div>
 
@@ -153,6 +153,8 @@ function DetailView({ code }: { code: string }) {
   const [yearFilter, setYearFilter] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [batchFilter, setBatchFilter] = useState("");
+  const [provinceFilter, setProvinceFilter] = useState("");
+  const [planProvinceFilter, setPlanProvinceFilter] = useState("");
 
   async function load(planYear?: number) {
     setLoading(true);
@@ -166,17 +168,29 @@ function DetailView({ code }: { code: string }) {
     }
   }
 
-  useEffect(() => { load(); }, [code]);
+  useEffect(() => {
+    // 切换院校时重置筛选，避免上一所的省份/年份筛选把新院校数据滤成「暂无数据」。
+    setYearFilter("");
+    setCategoryFilter("");
+    setBatchFilter("");
+    setProvinceFilter("");
+    setPlanProvinceFilter("");
+    load();
+  }, [code]);
 
   const scores = data?.scores ?? [];
   const scoreYears = distinct(scores.map((s) => s.year)).sort((a, b) => b - a);
   const scoreCategories = distinct(scores.map((s) => s.category));
   const scoreBatches = distinct(scores.map((s) => s.batch));
+  const scoreProvinces = distinct(scores.map((s) => s.province));
+  const planProvinces = distinct((data?.plans ?? []).map((p) => p.province));
+  const filteredPlans = (data?.plans ?? []).filter((p) => planProvinceFilter === "" || p.province === planProvinceFilter);
 
   const filteredScores = scores.filter((s) =>
     (yearFilter === "" || s.year === Number(yearFilter))
     && (categoryFilter === "" || s.category === categoryFilter)
-    && (batchFilter === "" || s.batch === batchFilter));
+    && (batchFilter === "" || s.batch === batchFilter)
+    && (provinceFilter === "" || s.province === provinceFilter));
 
   const u = data?.university;
 
@@ -224,6 +238,8 @@ function DetailView({ code }: { code: string }) {
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
               <div className="flex flex-wrap gap-3">
+                <FilterSelect label="省份" value={provinceFilter} onChange={setProvinceFilter}
+                  options={scoreProvinces.map((p) => ({ value: p, label: p }))} />
                 <FilterSelect label="年份" value={yearFilter} onChange={setYearFilter}
                   options={scoreYears.map((y) => ({ value: String(y), label: `${y} 年` }))} />
                 <FilterSelect label="科类" value={categoryFilter} onChange={setCategoryFilter}
@@ -238,22 +254,26 @@ function DetailView({ code }: { code: string }) {
           <Card>
             <CardHeader>
               <CardTitle className="text-base">招生计划</CardTitle>
-              <CardDescription>按学校名称关联当年招生计划；同专业可能因办学地点不同有多行。</CardDescription>
+              <CardDescription>按学校名称关联当年各试点省份招生计划；同专业可能因办学地点不同有多行。</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
               {data && data.plan_years.length > 0 && (
-                <div className="flex items-center gap-2">
-                  <Label htmlFor="plan-year">年份</Label>
-                  <select
-                    id="plan-year" className={selectClass}
-                    value={data.plan_year ?? ""}
-                    onChange={(e) => load(Number(e.target.value))}
-                  >
-                    {data.plan_years.map((y) => <option key={y} value={y}>{y} 年</option>)}
-                  </select>
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor="plan-year">年份</Label>
+                    <select
+                      id="plan-year" className={selectClass}
+                      value={data.plan_year ?? ""}
+                      onChange={(e) => load(Number(e.target.value))}
+                    >
+                      {data.plan_years.map((y) => <option key={y} value={y}>{y} 年</option>)}
+                    </select>
+                  </div>
+                  <FilterSelect label="省份" value={planProvinceFilter} onChange={setPlanProvinceFilter}
+                    options={planProvinces.map((p) => ({ value: p, label: p }))} />
                 </div>
               )}
-              <PlanTable rows={data?.plans ?? []} />
+              <PlanTable rows={filteredPlans} />
             </CardContent>
           </Card>
 
@@ -288,6 +308,7 @@ function ScoreTable({ rows }: { rows: ScoreRow[] }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-left text-muted-foreground">
+            <th className="px-2 py-2 font-medium">省份</th>
             <th className="px-2 py-2 font-medium">年份</th>
             <th className="px-2 py-2 font-medium">科类</th>
             <th className="px-2 py-2 font-medium">批次</th>
@@ -301,6 +322,7 @@ function ScoreTable({ rows }: { rows: ScoreRow[] }) {
         <tbody>
           {rows.map((s) => (
             <tr key={s.id} className="border-b border-border/60 align-top">
+              <td className="px-2 py-2">{s.province}</td>
               <td className="px-2 py-2">{s.year}</td>
               <td className="px-2 py-2">{s.category}</td>
               <td className="px-2 py-2">{s.batch}</td>
@@ -330,6 +352,7 @@ function PlanTable({ rows }: { rows: UniversityDetail["plans"] }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-left text-muted-foreground">
+            <th className="px-2 py-2 font-medium">省份</th>
             <th className="px-2 py-2 font-medium">专业名称</th>
             <th className="px-2 py-2 font-medium">专业代码</th>
             <th className="px-2 py-2 font-medium">批次</th>
@@ -342,6 +365,7 @@ function PlanTable({ rows }: { rows: UniversityDetail["plans"] }) {
         <tbody>
           {rows.map((p) => (
             <tr key={p.id} className="border-b border-border/60 align-top">
+              <td className="px-2 py-2">{p.province}</td>
               <td className="px-2 py-2 font-medium">{p.major_name}</td>
               <td className="px-2 py-2">{nd(p.major_code)}</td>
               <td className="px-2 py-2">{nd(p.batch)}</td>

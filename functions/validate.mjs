@@ -96,15 +96,30 @@ const RESOURCE_DESC_MAX = 500;
 const RESOURCE_URL_MAX = 500;
 
 // 来源链接型资料登记：标题/类型/来源链接/来源名称必填，版权承诺必须勾选。
-// 文件直传待平台 Storage 适配器接通后开启：body 里出现任何 file_* 字段即拒绝，
-// 并返回 file_upload_unavailable，绝不把文件元数据写成“已上传”。
+// 链接型 body 里出现任何 file_* / storage_key 字段即拒绝（文件型走专用校验）。
 export function validateResourceInput(body) {
   if (body?.file_name !== undefined && body?.file_name !== null
     || body?.file_size !== undefined && body?.file_size !== null
     || body?.mime !== undefined && body?.mime !== null
     || body?.storage_key !== undefined && body?.storage_key !== null) {
-    throw new AppError('file_upload_unavailable', 400);
+    throw new AppError('invalid_resource', 400);
   }
+  const base = validateResourceBase(body);
+  const sourceUrl = typeof body?.source_url === 'string' ? body.source_url.trim() : '';
+  if (sourceUrl.length === 0 || sourceUrl.length > RESOURCE_URL_MAX) throw new AppError('invalid_resource', 400);
+  let parsed;
+  try { parsed = new URL(sourceUrl); } catch { throw new AppError('invalid_resource', 400); }
+  if (parsed.protocol !== 'https:') throw new AppError('invalid_resource', 400);
+  return { ...base, source_url: sourceUrl };
+}
+
+// 文件型资料登记：来源是上传者本人（source_name 说明出处），没有外部链接，
+// source_url 由路由置空；文件元数据不在此处校验，落库前以回读实测值为准。
+export function validateFileResourceInput(body) {
+  return validateResourceBase(body);
+}
+
+function validateResourceBase(body) {
   const title = typeof body?.title === 'string' ? body.title.trim() : '';
   if ([...title].length < RESOURCE_TITLE_MIN || [...title].length > RESOURCE_TITLE_MAX) {
     throw new AppError('invalid_resource', 400);
@@ -118,11 +133,6 @@ export function validateResourceInput(body) {
     throw new AppError('invalid_resource', 400);
   }
   if (!RESOURCE_TYPES.includes(body?.type)) throw new AppError('invalid_resource', 400);
-  const sourceUrl = typeof body?.source_url === 'string' ? body.source_url.trim() : '';
-  if (sourceUrl.length === 0 || sourceUrl.length > RESOURCE_URL_MAX) throw new AppError('invalid_resource', 400);
-  let parsed;
-  try { parsed = new URL(sourceUrl); } catch { throw new AppError('invalid_resource', 400); }
-  if (parsed.protocol !== 'https:') throw new AppError('invalid_resource', 400);
   const sourceName = typeof body?.source_name === 'string' ? body.source_name.trim() : '';
   if ([...sourceName].length < 1 || [...sourceName].length > 50) throw new AppError('invalid_resource', 400);
   const description = typeof body?.description === 'string' ? body.description.trim() : '';
@@ -133,7 +143,6 @@ export function validateResourceInput(body) {
     grade: grade || null,
     subject: subject || null,
     type: body.type,
-    source_url: sourceUrl,
     source_name: sourceName,
     description: description === '' ? null : description,
   };

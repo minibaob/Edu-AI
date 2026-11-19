@@ -2,6 +2,7 @@
 // 不打进 Function 包。账号 localadmin 仅为本地 fixture 管理员，与线上无关。
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
 const ORIGIN = 'https://local.fixture';
 export const LOCAL_ADMIN = { username: 'localadmin', password: 'local-admin-pw-123' };
@@ -83,8 +84,8 @@ export async function seedLocal(handle, db, dir) {
   const me = await call(handle, '/api/me', { cookie });
   await db.from('users').update({ role: 'admin' }).eq('id', me.json.user.id);
 
-  const counts = { universities: 0, admission_scores: 0, enrollment_plans: 0 };
-  const runId = 'b'.repeat(64);
+  // 每个目录独立 run_id：多省依次灌入时行 id 不冲突。
+  const runId = createHash('sha256').update(`seed|${dir}`).digest('hex');
   for (const table of ['universities', 'admission_scores', 'enrollment_plans']) {
     const grid = parseCsv(fs.readFileSync(path.join(dir, `${table}.csv`), 'utf8'));
     const records = toRecords(table, grid);
@@ -98,7 +99,6 @@ export async function seedLocal(handle, db, dir) {
       if (r.status !== 200) throw new Error(`import ${table} chunk ${i} failed: ${r.status} ${JSON.stringify(r.json)}`);
       inserted += r.json.inserted;
     }
-    counts[table] = records.length;
     if (table === 'universities') {
       const m = await call(handle, '/api/admin/meta', { method: 'POST', cookie, body: { key: 'universities_index', value: records.map((r) => ({ code: String(r.code), name: String(r.name) })) } });
       if (m.status !== 200) throw new Error(`meta universities_index failed: ${m.status} ${JSON.stringify(m.json)}`);
@@ -111,6 +111,5 @@ export async function seedLocal(handle, db, dir) {
     }
     console.log(`seeded ${table}: ${records.length} rows (inserted ${inserted})`);
   }
-  await call(handle, '/api/admin/meta', { method: 'POST', cookie, body: { key: 'counts', value: counts } });
   console.log(`seed complete. 本地 fixture 管理员：${LOCAL_ADMIN.username} / ${LOCAL_ADMIN.password}（仅本地演练）`);
 }

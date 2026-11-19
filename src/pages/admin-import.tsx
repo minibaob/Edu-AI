@@ -40,7 +40,6 @@ export default function AdminImportPage() {
     universities: { ...initial }, admission_scores: { ...initial }, enrollment_plans: { ...initial },
   });
   const parsed = useRef<Partial<Record<ImportTable, { runId: string; records: ImportRecord[] }>>>({});
-  const counts = useRef({ universities: 0, admission_scores: 0, enrollment_plans: 0 });
 
   function patch(table: ImportTable, partial: Partial<TableState>) {
     setStates((prev) => ({ ...prev, [table]: { ...prev[table], ...partial } }));
@@ -77,8 +76,6 @@ export default function AdminImportPage() {
         patch(table, { nextChunk: i + 1, inserted });
       }
       await publishMeta(table, records);
-      counts.current[table] = records.length;
-      await postMeta("counts", { ...counts.current });
       patch(table, { status: "done", nextChunk: totalChunks });
     } catch (err) {
       patch(table, { status: "error", error: errorMessage(err) });

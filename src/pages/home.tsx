@@ -117,7 +117,11 @@ export default function HomePage() {
   const statCards = [
     {
       label: "资料总数",
-      display: stats ? statValue(stats.resources_total, "份", "暂无数据") : statsError ? "加载失败" : "加载中…",
+      display: stats
+        ? stats.resources_total === null
+          ? "暂无数据"
+          : `${stats.resources_total}${stats.resources_capped ? "+" : ""} 份`
+        : statsError ? "加载失败" : "加载中…",
     },
     {
       label: "高校收录",
@@ -128,7 +132,7 @@ export default function HomePage() {
       display: stats
         ? stats.favorites_count === null
           ? "登录后查看"
-          : `${stats.favorites_count} 份`
+          : `${stats.favorites_count}${stats.favorites_capped ? "+" : ""} 份`
         : statsError
           ? "加载失败"
           : "加载中…",
@@ -138,7 +142,7 @@ export default function HomePage() {
       display: stats
         ? stats.assessments_count === null
           ? "登录后查看"
-          : `${stats.assessments_count} 次`
+          : `${stats.assessments_count}${stats.assessments_capped ? "+" : ""} 次`
         : statsError
           ? "加载失败"
           : "加载中…",

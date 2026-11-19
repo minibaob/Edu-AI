@@ -1,11 +1,12 @@
-// 模块4 学习资料库：浏览（搜索 + 年级/学科/类型筛选 + 分页）、详情、收藏、登记来源链接型资料。
-// 没有资料时展示空状态，不填充虚构资料。文件直传待平台 Storage 接入后开放，当前只接受
-// 来源链接型登记；版权承诺为必填项。
+// 模块4 学习资料库：浏览（搜索 + 年级/学科/类型筛选 + 分页）、详情、收藏、
+// 登记来源链接型资料与文件直传（平台 Storage 签名上传，服务端回读校验后才登记）。
+// 没有资料时展示空状态，不填充虚构资料。版权承诺为必填项。
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import {
   ArrowLeft,
   BookOpen,
+  Download,
   ExternalLink,
   Heart,
   LogIn,
@@ -27,9 +28,12 @@ import { GRADES, SUBJECTS } from "@/src/lib/options";
 import {
   createResource,
   favoriteResource,
+  getFileDownloadUrl,
   getResource,
   listFavorites,
   listResources,
+  putFileToSignedUrl,
+  requestUploadUrl,
   unfavoriteResource,
 } from "@/src/lib/resources";
 import type { Resource } from "@/src/lib/resources";
@@ -39,6 +43,26 @@ const selectClass =
   "h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50";
 const PAGE_SIZE = 20;
 const RESOURCE_TYPES = ["教材", "知识点", "笔记", "试卷", "模拟卷", "真题", "其他"];
+const FILE_MAX_BYTES = 10 * 1024 * 1024;
+const ALLOWED_EXTS = new Set(["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "md", "csv", "png", "jpg", "jpeg", "webp", "zip"]);
+// 文档与图片分开两个可见选择器：微信等内置浏览器对混合 accept 的支持不一致。
+const DOC_ACCEPT = ".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.csv,.zip";
+const IMAGE_ACCEPT = "image/png,image/jpeg,image/webp";
+
+function formatBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
+}
+
+function filePrecheck(file: File): string | null {
+  const dot = file.name.lastIndexOf(".");
+  const ext = dot > 0 ? file.name.slice(dot + 1).toLowerCase() : "";
+  if (!ALLOWED_EXTS.has(ext)) return "不支持该文件类型，可上传 PDF、Word、PPT、Excel、文本、图片或 ZIP";
+  if (file.size === 0) return "文件为空，请重新选择";
+  if (file.size > FILE_MAX_BYTES) return "文件超过 10MB 上限，请压缩或拆分后再上传";
+  return null;
+}
 
 function hashId(): string | null {
   const query = window.location.hash.split("?")[1] ?? "";
@@ -57,6 +81,7 @@ export default function ResourcesPage() {
   const [subject, setSubject] = useState("");
   const [type, setType] = useState("");
   const [offset, setOffset] = useState(0);
+  const [listVersion, setListVersion] = useState(0);
   const [total, setTotal] = useState(0);
   const [items, setItems] = useState<Resource[]>([]);
   const [loading, setLoading] = useState(true);
@@ -68,6 +93,10 @@ export default function ResourcesPage() {
   const [favBusy, setFavBusy] = useState(false);
 
   const [showUpload, setShowUpload] = useState(false);
+  const [uploadMode, setUploadMode] = useState<"link" | "file">("link");
+  const [file, setFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [downloadBusy, setDownloadBusy] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [form, setForm] = useState({
@@ -107,7 +136,7 @@ export default function ResourcesPage() {
     } finally {
       setLoading(false);
     }
-  }, [tab, appliedQ, grade, subject, type, offset]);
+  }, [tab, appliedQ, grade, subject, type, offset, listVersion]);
 
   useEffect(() => {
     if (!selectedId) void loadList();
@@ -151,28 +180,71 @@ export default function ResourcesPage() {
     }
   }
 
+  function pickFile(list: FileList | null) {
+    const picked = list?.[0] ?? null;
+    setFile(picked);
+    setFileError(picked ? filePrecheck(picked) : null);
+  }
+
+  async function downloadFile(resource: Resource) {
+    setDownloadBusy(true);
+    try {
+      const { downloadUrl, file_name } = await getFileDownloadUrl(resource.id);
+      const anchor = document.createElement("a");
+      anchor.href = downloadUrl;
+      anchor.download = file_name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } catch (err) {
+      setDetailError(errorMessage(err));
+    } finally {
+      setDownloadBusy(false);
+    }
+  }
+
   async function handleUpload(event: FormEvent) {
     event.preventDefault();
     setUploadMsg(null);
+    if (uploadMode === "file") {
+      if (!file) { setUploadMsg({ ok: false, text: "请先选择要上传的文件" }); return; }
+      if (fileError) { setUploadMsg({ ok: false, text: fileError }); return; }
+    }
     setUploadBusy(true);
     try {
-      await createResource({
+      const base = {
         title: form.title.trim(),
         grade: form.grade || undefined,
         subject: form.subject || undefined,
         type: form.type,
-        source_url: form.source_url.trim(),
         source_name: form.source_name.trim(),
         description: form.description.trim() || undefined,
         copyright_confirmed: form.copyright_confirmed,
-      });
-      setUploadMsg({ ok: true, text: "资料已登记" });
+      };
+      if (uploadMode === "file" && file) {
+        // 签发 → 浏览器 PUT 到签名 URL → 服务端回读校验通过后才登记。
+        const intent = await requestUploadUrl({ file_name: file.name, file_size: file.size });
+        await putFileToSignedUrl(intent.uploadUrl, file, intent.contentType);
+        await createResource({
+          ...base,
+          storage_key: intent.storageKey,
+          file_name: file.name,
+          file_size: file.size,
+        });
+        setUploadMsg({ ok: true, text: "文件已上传并登记" });
+        setFile(null);
+        setFileError(null);
+      } else {
+        await createResource({ ...base, source_url: form.source_url.trim() });
+        setUploadMsg({ ok: true, text: "资料已登记" });
+      }
       setForm({
         title: "", grade: "", subject: "", type: "笔记",
         source_url: "", source_name: "", description: "", copyright_confirmed: false,
       });
       setTab("mine");
       setOffset(0);
+      setListVersion((v) => v + 1);
     } catch (err) {
       setUploadMsg({ ok: false, text: errorMessage(err) });
     } finally {
@@ -210,18 +282,37 @@ export default function ResourcesPage() {
               {detail.description && <p className="leading-relaxed">{detail.description}</p>}
               <p className="text-muted-foreground">
                 来源：{detail.source_name}
-                {" · "}
-                <a
-                  className="inline-flex items-center gap-1 text-primary hover:underline"
-                  href={detail.source_url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  打开来源 <ExternalLink className="size-3.5" aria-hidden />
-                </a>
+                {detail.source_url && (
+                  <>
+                    {" · "}
+                    <a
+                      className="inline-flex items-center gap-1 text-primary hover:underline"
+                      href={detail.source_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      打开来源 <ExternalLink className="size-3.5" aria-hidden />
+                    </a>
+                  </>
+                )}
               </p>
-              {detail.file_name && (
-                <p className="text-muted-foreground">附件：{detail.file_name}</p>
+              {detail.has_file && detail.file_name && (
+                <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-muted/40 p-3">
+                  <Download className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="min-w-0 flex-1 truncate">
+                    {detail.file_name}
+                    {detail.file_size != null && (
+                      <span className="ml-2 text-xs text-muted-foreground">{formatBytes(detail.file_size)}</span>
+                    )}
+                  </span>
+                  {user ? (
+                    <Button size="sm" disabled={downloadBusy} onClick={() => void downloadFile(detail)}>
+                      {downloadBusy ? "获取中…" : "下载附件"}
+                    </Button>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">登录后可下载</span>
+                  )}
+                </div>
               )}
               <div className="flex gap-2">
                 <Button
@@ -266,11 +357,16 @@ export default function ResourcesPage() {
           <CardHeader>
             <CardTitle className="text-lg">登记资料</CardTitle>
             <CardDescription>
-              当前可登记来源链接型资料（官方页面、公开讲义等）。文件直传待平台存储接入后开放。
+              可登记来源链接型资料（官方页面、公开讲义等），或直接上传文件
+              （PDF、Word、PPT、Excel、文本、图片、ZIP，单个不超过 10MB）。仅可分享你有权公开的内容。
             </CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleUpload} className="flex flex-col gap-4">
+              <div className="flex gap-2" role="group" aria-label="登记方式">
+                <Button type="button" size="sm" variant={uploadMode === "link" ? "default" : "outline"} onClick={() => setUploadMode("link")}>链接登记</Button>
+                <Button type="button" size="sm" variant={uploadMode === "file" ? "default" : "outline"} onClick={() => setUploadMode("file")}>文件上传</Button>
+              </div>
               <div className="flex flex-col gap-2">
                 <Label htmlFor="res-title">标题 *</Label>
                 <Input
@@ -304,24 +400,58 @@ export default function ResourcesPage() {
                   </select>
                 </div>
               </div>
+              {uploadMode === "link" ? (
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="res-url">来源链接 *</Label>
+                  <Input
+                    id="res-url"
+                    value={form.source_url}
+                    onChange={(e) => setForm({ ...form, source_url: e.target.value })}
+                    placeholder="https:// 开头的官方或公开页面地址"
+                    required
+                  />
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <Label>选择文件 *（文档或图片，单个不超过 10MB）</Label>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <label className="flex flex-1 cursor-pointer items-center gap-2 rounded-md border border-dashed px-3 py-2 text-sm hover:border-primary/50">
+                      <Upload className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <span className="shrink-0">选文档</span>
+                      <input
+                        type="file"
+                        accept={DOC_ACCEPT}
+                        className="w-full min-w-0 text-xs text-muted-foreground"
+                        onChange={(e) => pickFile(e.target.files)}
+                      />
+                    </label>
+                    <label className="flex flex-1 cursor-pointer items-center gap-2 rounded-md border border-dashed px-3 py-2 text-sm hover:border-primary/50">
+                      <Upload className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <span className="shrink-0">选图片</span>
+                      <input
+                        type="file"
+                        accept={IMAGE_ACCEPT}
+                        className="w-full min-w-0 text-xs text-muted-foreground"
+                        onChange={(e) => pickFile(e.target.files)}
+                      />
+                    </label>
+                  </div>
+                  {file && !fileError && (
+                    <p className="text-sm text-muted-foreground">已选择：{file.name}（{formatBytes(file.size)}）</p>
+                  )}
+                  {fileError && (
+                    <Alert variant="destructive"><AlertDescription>{fileError}</AlertDescription></Alert>
+                  )}
+                </div>
+              )}
               <div className="flex flex-col gap-2">
-                <Label htmlFor="res-url">来源链接 *</Label>
-                <Input
-                  id="res-url"
-                  value={form.source_url}
-                  onChange={(e) => setForm({ ...form, source_url: e.target.value })}
-                  placeholder="https:// 开头的官方或公开页面地址"
-                  required
-                />
-              </div>
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="res-source">来源名称 *</Label>
+                <Label htmlFor="res-source">{uploadMode === "link" ? "来源名称 *" : "来源说明 *（如：本人整理 / 某官网公开资料）"}</Label>
                 <Input
                   id="res-source"
                   value={form.source_name}
                   onChange={(e) => setForm({ ...form, source_name: e.target.value })}
                   maxLength={50}
-                  placeholder="例如：人民教育出版社官网"
+                  placeholder={uploadMode === "link" ? "例如：人民教育出版社官网" : "例如：本人整理的课堂笔记"}
                   required
                 />
               </div>
@@ -350,7 +480,7 @@ export default function ResourcesPage() {
                 </Alert>
               )}
               <Button type="submit" disabled={uploadBusy} className="w-fit">
-                {uploadBusy ? "登记中…" : "提交登记"}
+                {uploadBusy ? (uploadMode === "file" ? "上传中…" : "登记中…") : "提交登记"}
               </Button>
             </form>
           </CardContent>
@@ -478,14 +608,23 @@ export default function ResourcesPage() {
                         <span className="max-w-56 truncate text-xs text-muted-foreground" title={item.source_name}>
                           来源：{item.source_name}
                         </span>
-                        <a
-                          className="inline-flex shrink-0 items-center gap-1 text-xs text-primary hover:underline"
-                          href={item.source_url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          打开来源 <ExternalLink className="size-3" aria-hidden />
-                        </a>
+                        <span className="flex shrink-0 items-center gap-2">
+                          {item.has_file && (
+                            <Badge variant="secondary" className="gap-1">
+                              <Download className="size-3" aria-hidden />附件
+                            </Badge>
+                          )}
+                          {item.source_url && (
+                            <a
+                              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                              href={item.source_url}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              打开来源 <ExternalLink className="size-3" aria-hidden />
+                            </a>
+                          )}
+                        </span>
                       </div>
                     </CardContent>
                   </Card>

@@ -42,8 +42,16 @@ const ERROR_MESSAGES: Record<string, string> = {
   rate_limited: "尝试次数过多，请稍后再试",
   login_required: "请先登录",
   invalid_filter: "筛选条件不正确，请重新选择",
-  invalid_resource: "资料信息不正确，请检查标题、分类与来源链接",
-  file_upload_unavailable: "文件上传尚未开放：平台存储接入后开启，当前可登记来源链接型资料",
+  invalid_resource: "资料信息不正确，请检查标题、分类与来源",
+  file_upload_unavailable: "文件服务暂时不可用，请稍后重试，或先登记来源链接型资料",
+  invalid_file: "文件不正确，请检查文件名与大小后重试",
+  unsupported_file_type: "不支持该文件类型，可上传 PDF、Word、PPT、Excel、文本、图片或 ZIP",
+  file_too_large: "文件超过 10MB 上限，请压缩或拆分后再上传",
+  file_forbidden: "不能登记他人上传的文件",
+  file_validation_failed: "文件校验未通过（大小或类型不符），请重新上传",
+  file_not_found: "该资料没有可下载的文件",
+  storage_unavailable: "文件服务暂时不可用，请稍后重试",
+  upload_failed: "文件上传失败，请检查网络后重试",
   resource_unconfirmed: "资料保存结果未确认，请刷新后查看",
   invalid_assessment: "测评答案不正确，请重新作答",
   not_found: "未找到相关内容",
@@ -66,6 +74,9 @@ const ERROR_MESSAGES: Record<string, string> = {
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     return ERROR_MESSAGES[error.code] ?? "操作失败，请稍后重试";
+  }
+  if (error instanceof Error && ERROR_MESSAGES[error.message]) {
+    return ERROR_MESSAGES[error.message];
   }
   return "操作失败，请稍后重试";
 }

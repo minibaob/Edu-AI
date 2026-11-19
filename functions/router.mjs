@@ -3,7 +3,7 @@
 // 绝不使用 ctx.user、平台身份、Host 头或浏览器提交的 owner_id。
 import { AppError, applicationPath, errorJson, json, readJson, requireTrustedOrigin, rows } from './http.mjs';
 import { canonicalUsername, validatePassword, validateProfile } from './validate.mjs';
-import { isUuid, parseListQuery, parseMajorQuery, validateResourceInput } from './validate.mjs';
+import { isUuid, parseListQuery, parseMajorQuery, validateFileResourceInput, validateResourceInput } from './validate.mjs';
 import { GRADES, RESOURCE_TYPES, SUBJECTS } from './validate.mjs';
 import { scoreAssessment, validateAnswers } from './assessment.mjs';
 import {
@@ -14,7 +14,9 @@ import {
   OPTIONS as MBTI_OPTIONS, QUESTIONS as MBTI_QUESTIONS,
   computeResult as computeMbti, publicResult as mbtiPublicResult, validateAnswers as validateMbtiAnswers,
 } from './mbti.mjs';
-import { importChunk, listUniversities as listUniversitiesIndex, universityDetail as fetchUniversityDetail, updateMeta } from './universities.mjs';
+import { importChunk, listUniversities as listUniversitiesIndex, readMeta, universityDetail as fetchUniversityDetail, updateMeta } from './universities.mjs';
+import { FILE_MAX_BYTES, assertOwnedKey, storageKeyFor, validateUploadIntent } from './resource-files.mjs';
+import { verifyUploadedObject } from './storage-validation.mjs';
 import { hashPassword, verifyPassword, verifyPasswordAgainstDummy } from './passwords.mjs';
 import { SESSION_TTL_MS, clearSessionCookie, createSession, revokeSession, sessionCookie, validateSession } from './sessions.mjs';
 import { consume } from './limiter.mjs';
@@ -23,6 +25,7 @@ const SESSION_TTL_SECONDS = Math.floor(SESSION_TTL_MS / 1000);
 const encoder = new TextEncoder();
 const USER_COLUMNS = 'id,username,display_name,grade,province,subjects,role,created_at';
 const CREDENTIAL_COLUMNS = 'id,username,password_salt,password_hash,password_iterations';
+const COUNT_LIMIT = 500;
 
 class SessionRequired extends Error {
   constructor(state) {
@@ -64,7 +67,7 @@ function publicUser(row) {
 // 该项返回 null，前端显示「暂无数据」，不让整个接口 500。
 async function countRows(db, table, filters = {}) {
   try {
-    let query = db.from(table).select('id').limit(500);
+    let query = db.from(table).select('id').limit(COUNT_LIMIT);
     for (const [key, value] of Object.entries(filters)) query = query.eq(key, value);
     return rows(await query).length;
   } catch {
@@ -76,24 +79,39 @@ async function stats(db, request) {
   const session = await validateSession(db, request);
   const userId = session.state === 'valid' ? session.session.userId : null;
   const resourcesTotal = await countRows(db, 'resources');
-  const universitiesTotal = await countRows(db, 'universities');
+  // 院校总量只来自导入时服务端维护的 counts 元数据（精确值）；未导入时为 null。
+  let universitiesTotal = null;
+  try {
+    const counts = await readMeta(db, 'counts');
+    if (counts && typeof counts.universities === 'number') universitiesTotal = counts.universities;
+  } catch {
+    universitiesTotal = null;
+  }
   let favoritesCount = null;
+  let favoritesCapped = false;
   let assessmentsCount = null;
+  let assessmentsCapped = false;
   if (userId) {
     try {
-      const mine = rows(await db.from('favorites').select('id,revoked_at').eq('user_id', userId).limit(500));
+      // favorites 是 (user_id, resource_id) 复合主键，没有 id 列。
+      const mine = rows(await db.from('favorites').select('resource_id,revoked_at').eq('user_id', userId).limit(COUNT_LIMIT));
+      favoritesCapped = mine.length === COUNT_LIMIT;
       favoritesCount = mine.filter((row) => row.revoked_at == null).length;
     } catch {
       favoritesCount = null;
     }
-    assessmentsCount = await countRows(db, 'assessment_results', { user_id: userId });
+    assessmentsCount = await countRows(db, 'assessments', { user_id: userId });
+    assessmentsCapped = assessmentsCount === COUNT_LIMIT;
   }
   return json({
     stats: {
       resources_total: resourcesTotal,
+      resources_capped: resourcesTotal === COUNT_LIMIT,
       universities_total: universitiesTotal,
       favorites_count: favoritesCount,
+      favorites_capped: favoritesCapped,
       assessments_count: assessmentsCount,
+      assessments_capped: assessmentsCapped,
     },
   });
 }
@@ -302,8 +320,9 @@ async function listMajors(db, request) {
   return json({ total, items });
 }
 // ---- 模块4：学习资料库 ----
-// 读接口公开；写接口（登记、收藏）必须登录，归属一律来自会话，绝不信任浏览器提交的 owner_id。
-// 文件直传未接通：登记只接受来源链接型资料；file_* 字段由 validateResourceInput 拒绝。
+// 读接口公开；写接口（登记、收藏、文件上传）必须登录，归属一律来自会话，绝不信任浏览器提交的 owner_id。
+// 文件型资料走平台 Storage 签名直传：签发上传 URL → 浏览器 PUT → 登记时服务端回读实际字节，
+// 用 storage-validation 复核大小与 MIME 后才落库；下载同样由服务端按数据库行签发短时 URL。
 const RESOURCE_COLUMNS = 'id,owner_id,title,grade,subject,type,source_url,source_name,description,file_name,file_size,mime,storage_key,copyright_confirmed,created_at';
 const FAVORITE_COLUMNS = 'user_id,resource_id,created_at,revoked_at';
 
@@ -321,6 +340,7 @@ function publicResource(row, favorited = false) {
     file_name: row.file_name ?? null,
     file_size: row.file_size ?? null,
     mime: row.mime ?? null,
+    has_file: row.storage_key != null,
     copyright_confirmed: row.copyright_confirmed === true,
     favorited,
     created_at: row.created_at,
@@ -388,8 +408,7 @@ async function getResource(db, request, id) {
   return json({ resource: publicResource(found[0], favorited) });
 }
 
-async function createResource(db, request, session) {
-  const body = await readJson(request);
+async function createResource(db, body, session) {
   const input = validateResourceInput(body);
   const id = crypto.randomUUID();
   const created = rows(await db.from('resources').insertIfAbsent({
@@ -405,6 +424,84 @@ async function createResource(db, request, session) {
   }, { onConflict: 'id' }).select(RESOURCE_COLUMNS));
   if (created.length !== 1) return errorJson('resource_unconfirmed', 503);
   return json({ resource: publicResource(created[0]) }, 201);
+}
+
+// 文件直传第一步：校验文件意图，服务端派生存储路径并签发上传 URL。
+// 路径目录段是会话用户 ID 的 SHA-256 摘要，登记时据此复核归属。
+async function requestUploadUrl(storage, request, session) {
+  if (!storage) throw new AppError('file_upload_unavailable', 503);
+  const intent = validateUploadIntent(await readJson(request));
+  const storageKey = await storageKeyFor(session.userId, intent.ext);
+  let signed;
+  try {
+    signed = await storage.createSignedUploadUrl(storageKey, { upsert: false });
+  } catch {
+    throw new AppError('storage_unavailable', 503);
+  }
+  return json({
+    uploadUrl: signed.signedUrl, storageKey, contentType: intent.mime, maxBytes: FILE_MAX_BYTES,
+  });
+}
+
+// 文件直传第二步：回读已上传对象，实测字节数与 MIME 通过后才登记。
+// 浏览器声明的大小只作期望值；落库的 file_size/mime 一律取实测结果。
+async function createFileResource(db, storage, body, session) {
+  if (!storage) throw new AppError('file_upload_unavailable', 503);
+  const input = validateFileResourceInput(body);
+  const intent = validateUploadIntent(body);
+  await assertOwnedKey(body.storage_key, session.userId);
+  if (body.storage_key.slice(body.storage_key.lastIndexOf('.') + 1) !== intent.ext) {
+    throw new AppError('invalid_file', 400);
+  }
+  let actual;
+  try {
+    const object = await storage.download(body.storage_key);
+    actual = await verifyUploadedObject(object, {
+      maxBytes: FILE_MAX_BYTES,
+      expectedBytes: intent.size,
+      allowedContentTypes: [intent.mime],
+    });
+  } catch {
+    // 校验失败不落库；同一上传意图下尽力清理已上传对象，失败不掩盖原错误。
+    try { await storage.remove([body.storage_key]); } catch { /* 清理尽力而为 */ }
+    throw new AppError('file_validation_failed', 400);
+  }
+  const id = crypto.randomUUID();
+  const created = rows(await db.from('resources').insertIfAbsent({
+    id,
+    owner_id: session.userId,
+    ...input,
+    source_url: '',
+    file_name: intent.name,
+    file_size: actual.size,
+    mime: actual.contentType,
+    storage_key: body.storage_key,
+    copyright_confirmed: true,
+    created_at: new Date().toISOString(),
+  }, { onConflict: 'id' }).select(RESOURCE_COLUMNS));
+  if (created.length !== 1) return errorJson('resource_unconfirmed', 503);
+  return json({ resource: publicResource(created[0]) }, 201);
+}
+
+// 文件下载：登录后按数据库行（服务端持有的路径）签发 300 秒下载 URL。
+// 资料库是共享学习资料，任何已登录学生可下载；路径绝不来自浏览器输入。
+async function resourceFileUrl(db, storage, session, id) {
+  if (!isUuid(id)) throw new AppError('not_found', 404);
+  if (!storage) throw new AppError('file_upload_unavailable', 503);
+  const found = rows(await db.from('resources').select(RESOURCE_COLUMNS).eq('id', id).limit(1));
+  if (found.length !== 1 || found[0].storage_key == null) throw new AppError('file_not_found', 404);
+  let signed;
+  try {
+    signed = await storage.createSignedUrl(found[0].storage_key, 300);
+  } catch {
+    throw new AppError('storage_unavailable', 503);
+  }
+  return json({
+    downloadUrl: signed.signedUrl,
+    file_name: found[0].file_name,
+    file_size: found[0].file_size,
+    mime: found[0].mime,
+  });
 }
 
 async function favoriteResource(db, request, session, id) {
@@ -468,15 +565,25 @@ async function saveAssessment(db, request, session) {
 }
 
 async function listAssessments(db, request, session) {
-  const all = rows(await db.from('assessment_results').select(ASSESSMENT_COLUMNS).eq('user_id', session.userId).limit(500));
-  all.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
-  const items = all.slice(0, 20).map((row) => ({
-    id: row.id, scores: JSON.parse(row.scores), top_types: JSON.parse(row.top_types), created_at: row.created_at,
-  }));
-  return json({ total: all.length, items });
+  const found = rows(await db.from('assessments').select('id,kind,code,scores,created_at')
+    .eq('user_id', session.userId)
+    .order('created_at', { ascending: false }).limit(50));
+  const items = found.map((row) => {
+    const kind = row.kind ?? 'riasec';
+    const scores = typeof row.scores === 'string' ? JSON.parse(row.scores) : row.scores;
+    return {
+      id: row.id,
+      kind,
+      code: row.code,
+      scores,
+      top_types: kind === 'mbti' ? [row.code] : String(row.code).split(''),
+      created_at: row.created_at,
+    };
+  });
+  return json({ total: items.length, items });
 }
 
-async function route(db, request, origin) {
+async function route(db, request, origin, storage) {
   requireTrustedOrigin(request, origin);
   const path = applicationPath(request);
 
@@ -515,9 +622,16 @@ async function route(db, request, origin) {
   }
   if (path === '/api/majors' && request.method === 'GET') return listMajors(db, request);
   if (path === '/api/resources' && request.method === 'GET') return listResources(db, request);
+  if (path === '/api/resources/upload-url' && request.method === 'POST') {
+    const session = await requireSession(db, request);
+    return requestUploadUrl(storage, request, session);
+  }
   if (path === '/api/resources' && request.method === 'POST') {
     const session = await requireSession(db, request);
-    return createResource(db, request, session);
+    const body = await readJson(request);
+    return body?.storage_key != null
+      ? createFileResource(db, storage, body, session)
+      : createResource(db, body, session);
   }
   if (path === '/api/favorites' && request.method === 'GET') {
     const session = await requireSession(db, request);
@@ -529,6 +643,11 @@ async function route(db, request, origin) {
     return favoriteMatch[2] === 'favorite'
       ? favoriteResource(db, request, session, favoriteMatch[1])
       : unfavoriteResource(db, request, session, favoriteMatch[1]);
+  }
+  const resourceFileMatch = path.match(/^\/api\/resources\/([0-9a-f-]{36})\/file$/);
+  if (resourceFileMatch && request.method === 'GET') {
+    const session = await requireSession(db, request);
+    return resourceFileUrl(db, storage, session, resourceFileMatch[1]);
   }
   const resourceDetail = path.match(/^\/api\/resources\/([0-9a-f-]{36})$/);
   if (resourceDetail && request.method === 'GET') return getResource(db, request, resourceDetail[1]);
@@ -576,18 +695,19 @@ async function route(db, request, origin) {
     return updateMeta(db, request);
   }
 
-  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health', '/api/universities', '/api/majors', '/api/resources', '/api/favorites', '/api/assessments', '/api/stats', '/api/assessment/questions', '/api/assessment/submit', '/api/assessment/latest', '/api/mbti/questions', '/api/mbti/submit', '/api/mbti/latest', '/api/admin/import', '/api/admin/meta'].includes(path)
-    || universityDetail || resourceDetail || favoriteMatch) {
+  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health', '/api/universities', '/api/majors', '/api/resources', '/api/resources/upload-url', '/api/favorites', '/api/assessments', '/api/stats', '/api/assessment/questions', '/api/assessment/submit', '/api/assessment/latest', '/api/mbti/questions', '/api/mbti/submit', '/api/mbti/latest', '/api/admin/import', '/api/admin/meta'].includes(path)
+    || universityDetail || resourceDetail || resourceFileMatch || favoriteMatch) {
     throw new AppError('method_not_allowed', 405);
   }
   throw new AppError('not_found', 404);
 }
 
 // 依赖注入只用于本地测试；ctx 只用于取 request，不使用其中的平台身份。
-export function createApplication({ db, origin }) {
+// storage 为平台注入的 Storage 适配器（生产来自 _qoder/storage.mjs，测试用假存储）。
+export function createApplication({ db, origin, storage }) {
   return async function handle(ctx) {
     try {
-      return await route(db, ctx.request, typeof origin === 'function' ? origin() : origin);
+      return await route(db, ctx.request, typeof origin === 'function' ? origin() : origin, storage);
     } catch (error) {
       if (error instanceof SessionRequired) return unauthorized(error.state);
       if (error instanceof AppError) return errorJson(error.code, error.status);

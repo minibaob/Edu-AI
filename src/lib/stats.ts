@@ -5,9 +5,12 @@ import { api } from "@/src/lib/api";
 
 export type HomeStats = {
   resources_total: number | null;
+  resources_capped: boolean;
   universities_total: number | null;
   favorites_count: number | null;
+  favorites_capped: boolean;
   assessments_count: number | null;
+  assessments_capped: boolean;
 };
 
 export async function fetchStats(): Promise<HomeStats> {

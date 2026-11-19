@@ -10,14 +10,16 @@ import { PBKDF2_ITERATIONS } from '../functions/passwords.mjs';
 import { SESSION_COOKIE, SESSION_TTL_MS, sha256Hex } from '../functions/sessions.mjs';
 import { LIMITS } from '../functions/limiter.mjs';
 import { createFakeDb } from './fake-db.mjs';
+import { createFakeStorage } from './fake-storage.mjs';
+import { FILE_MAX_BYTES, storageKeyFor } from '../functions/resource-files.mjs';
 
 // 每次运行生成的临时口令，不在任何输出中打印；测试结束即丢弃。
 const PASSWORD = `pw-${crypto.randomUUID()}-${crypto.randomUUID()}`;
 
-function fixture() {
+function fixture(storage) {
   const control = { mode: 'ok', dropTable: null, writes: [] };
   const db = createFakeDb(control);
-  const handle = createApplication({ db, origin: PUBLIC_ORIGIN });
+  const handle = createApplication({ db, origin: PUBLIC_ORIGIN, storage });
   return { control, db, handle };
 }
 
@@ -424,7 +426,7 @@ test('资料登记：校验、归属来自会话、文件字段被拒绝', async
     [{ ...RESOURCE_BODY, source_url: 'http://example.edu.cn/x' }, 'invalid_resource'],
     [{ ...RESOURCE_BODY, source_url: 'not-a-url' }, 'invalid_resource'],
     [{ ...RESOURCE_BODY, copyright_confirmed: false }, 'invalid_resource'],
-    [{ ...RESOURCE_BODY, file_name: 'a.pdf', file_size: 123, mime: 'application/pdf' }, 'file_upload_unavailable'],
+    [{ ...RESOURCE_BODY, file_name: 'a.pdf', file_size: 123, mime: 'application/pdf' }, 'invalid_resource'],
   ];
   for (const [body, code] of badCases) {
     const res = await call(handle, ctx('/api/resources', { method: 'POST', cookie, body }));
@@ -532,15 +534,20 @@ test('测评保存：未登录拒绝、非法答案 400、后端按固定规则�
   assert.deepEqual(savedMixed.body.assessment.top_types, ['R', 'C']);
 });
 
-test('测评记录：只看自己的，A/B 隔离', async () => {
-  const { handle } = fixture();
+test('遗留测评保存（POST /api/assessments）：只写 assessment_results、归属来自会话', async () => {
+  const { db, handle } = fixture();
   const cookieA = cookiePair(await register(handle, uniqueName()));
   const cookieB = cookiePair(await register(handle, uniqueName()));
-  await call(handle, ctx('/api/assessments', { method: 'POST', cookie: cookieA, body: { answers: Array(24).fill(3) } }));
+  const saved = await call(handle, ctx('/api/assessments', { method: 'POST', cookie: cookieA, body: { answers: Array(24).fill(3) } }));
+  assert.equal(saved.status, 201);
 
+  const dump = db.dump('assessment_results');
+  assert.equal(dump.length, 1);
+  assert.deepEqual(JSON.parse(dump[0].scores), { R: 50, I: 50, A: 50, S: 50, E: 50, C: 50 });
+  assert.equal(dump[0].user_id, (await me(handle, cookieA)).body.user.id);
+  // GET 历史读 assessments 表（霍兰德/MBTI 双 kind），遗留写入不混入。
   const listA = await call(handle, ctx('/api/assessments', { cookie: cookieA }));
-  assert.equal(listA.body.total, 1);
-  assert.deepEqual(listA.body.items[0].scores, { R: 50, I: 50, A: 50, S: 50, E: 50, C: 50 });
+  assert.equal(listA.body.total, 0);
   const listB = await call(handle, ctx('/api/assessments', { cookie: cookieB }));
   assert.equal(listB.body.total, 0, 'B 看不到 A 的测评记录');
 });
@@ -553,64 +560,7 @@ test('前后端题目维度顺序一致（防漂移）', async () => {
   assert.equal(found.length, 24);
   assert.deepEqual(found, QUESTION_DIMENSIONS);
 });
-// ---- 模块3：首页统计（真实计数，空数据如实显示） ----
-
-test('首页统计：公开读；未登录时个人计数为 null；计数反映真实行数', async () => {
-  const { db, handle } = fixture();
-
-  const anon = await call(handle, ctx('/api/stats'));
-  assert.equal(anon.status, 200);
-  assert.deepEqual(anon.body.stats, {
-    resources_total: 0,
-    universities_total: 0,
-    favorites_count: null,
-    assessments_count: null,
-  });
-
-  const created = await register(handle, uniqueName());
-  const cookie = cookiePair(created);
-  const userId = created.body.user.id;
-  const mine = await call(handle, ctx('/api/stats', { cookie }));
-  assert.deepEqual(mine.body.stats, {
-    resources_total: 0,
-    universities_total: 0,
-    favorites_count: 0,
-    assessments_count: 0,
-  });
-
-  // 直接向假数据库写入行，验证计数逻辑（模块 4/5/6 的写入接口在各自的分
-  // 支上测试，这里只测统计本身）。
-  await db.from('resources').insertIfAbsent({ id: 'r1', title: '资料一' }, { onConflict: 'id' });
-  await db.from('resources').insertIfAbsent({ id: 'r2', title: '资料二' }, { onConflict: 'id' });
-  await db.from('universities').insertIfAbsent({ id: 'u1', code: '10001' }, { onConflict: 'id' });
-  await db.from('favorites').insertIfAbsent(
-    { user_id: userId, resource_id: 'r1', created_at: new Date().toISOString() },
-    { onConflict: 'user_id,resource_id' }
-  );
-  await db.from('favorites').insertIfAbsent(
-    { user_id: userId, resource_id: 'r2', revoked_at: new Date().toISOString(), created_at: new Date().toISOString() },
-    { onConflict: 'user_id,resource_id' }
-  );
-  await db.from('assessment_results').insertIfAbsent(
-    { id: 'a1', user_id: userId, answers: '[]', scores: '{}', top_types: '[]', created_at: new Date().toISOString() },
-    { onConflict: 'id' }
-  );
-
-  const counted = await call(handle, ctx('/api/stats', { cookie }));
-  assert.deepEqual(counted.body.stats, {
-    resources_total: 2,
-    universities_total: 1,
-    favorites_count: 1, // 已取消收藏的那条不计入
-    assessments_count: 1,
-  });
-
-  // 别人的收藏不计入自己的统计；错误方法 405。
-  const other = await register(handle, uniqueName());
-  const otherStats = await call(handle, ctx('/api/stats', { cookie: cookiePair(other) }));
-  assert.equal(otherStats.body.stats.favorites_count, 0);
-  assert.equal(otherStats.body.stats.assessments_count, 0);
-  assert.equal((await call(handle, ctx('/api/stats', { method: 'POST', body: {} }))).status, 405);
-});
+// ---- 模块3：首页统计见下方「真实计数，空数据与触顶如实显示」测试 ----
 
 // tick：测评重测需要 created_at 递增，分开两次提交。
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -965,4 +915,279 @@ test('模块5：写入被拒不回退；响应丢失经确定性主键恢复不�
   const retry = await postImport(handle, cookie, chunk('enrollment_plans', [PLAN_ROW, PLAN_ROW2]));
   assert.equal(retry.body.inserted, 0);
   assert.equal(db.dump('enrollment_plans').length, 2);
+});
+
+test('模块5：多省增量导入元数据合并（索引/筛选面并集、计数服务端累加且幂等）', async () => {
+  const { handle, cookie } = await adminFixture();
+  // 河南批次
+  await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW]));
+  await postImport(handle, cookie, chunk('admission_scores', [{ ...SCORE_ROW, category: '理科' }]));
+  await postImport(handle, cookie, chunk('enrollment_plans', [PLAN_ROW]));
+  await postMeta(handle, cookie, { key: 'universities_index', value: [{ code: '10003', name: '清华大学' }] });
+  await postMeta(handle, cookie, { key: 'score_facets', value: { provinces: ['河南'], years: [2025], categories: ['理科'], batches: ['本科批'] } });
+  await postMeta(handle, cookie, { key: 'plan_facets', value: { provinces: ['河南'], years: [2025], batches: ['本科批'] } });
+  // 河北批次：新校 + 已有院校的他省录取/计划（国标代码相同）
+  await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW2], 1));
+  await postImport(handle, cookie, chunk('admission_scores', [{ ...SCORE_ROW, province: '河北', year: 2026 }], 1));
+  await postImport(handle, cookie, chunk('enrollment_plans', [{ ...PLAN_ROW, province: '河北', year: 2026 }], 1));
+  await postMeta(handle, cookie, { key: 'universities_index', value: [{ code: '10001', name: '北京大学' }] });
+  await postMeta(handle, cookie, { key: 'score_facets', value: { provinces: ['河北'], years: [2026], categories: ['物理类'], batches: ['本科批'] } });
+  await postMeta(handle, cookie, { key: 'plan_facets', value: { provinces: ['河北'], years: [2026], batches: ['本科批'] } });
+
+  const list = await call(handle, ctx('/api/universities'));
+  assert.equal(list.body.universities.length, 2, '院校索引为两省并集，不被新文件覆盖');
+  assert.deepEqual(list.body.score_facets.provinces, ['河北', '河南']);
+  assert.deepEqual(list.body.score_facets.years, [2025, 2026]);
+  assert.deepEqual(list.body.score_facets.categories, ['物理类', '理科']);
+  assert.deepEqual(list.body.plan_facets.provinces, ['河北', '河南']);
+  assert.deepEqual(list.body.plan_facets.years, [2025, 2026]);
+  assert.deepEqual(list.body.counts, { universities: 2, admission_scores: 2, enrollment_plans: 2 }, '计数按实际插入行数服务端累加');
+
+  const retry = await postImport(handle, cookie, chunk('admission_scores', [{ ...SCORE_ROW, province: '河北', year: 2026 }], 1));
+  assert.equal(retry.body.inserted, 0);
+  const after = await call(handle, ctx('/api/universities'));
+  assert.equal(after.body.counts.admission_scores, 2, '幂等重跑不增计数');
+  const detail = await call(handle, ctx('/api/universities/10003?year=2026'));
+  assert.equal(detail.body.scores.length, 2, '已有院校的两省录取按国标代码都可查');
+  assert.equal(detail.body.scores[0].province, '河北', '年份倒序');
+  assert.equal(detail.body.plans.length, 1, '已有院校的他省计划按名称可查');
+});
+
+// ---- 模块4 扩展：文件直传直下（平台 Storage 签名上传/下载 + 回读校验） ----
+const FILE_BODY = {
+  title: '高中数学函数专题讲义',
+  grade: '高一',
+  subject: '数学',
+  type: '笔记',
+  source_name: '自己整理',
+  description: '函数单调性与奇偶性',
+  copyright_confirmed: true,
+};
+const bytesOf = (n) => new Uint8Array(n).fill(65);
+const uploadUrl = (handle, cookie, body) =>
+  call(handle, ctx('/api/resources/upload-url', { method: 'POST', cookie, body }));
+const finalizeFile = (handle, cookie, body) =>
+  call(handle, ctx('/api/resources', { method: 'POST', cookie, body }));
+
+test('测评记录：登录门槛、只看自己的、两种测评按时间倒序共存', async () => {
+  const { handle } = fixture();
+  assert.equal((await call(handle, ctx('/api/assessments'))).status, 401);
+  assert.equal((await call(handle, ctx('/api/assessments', { method: 'POST', body: {} }))).status, 401);
+  const cookieA = cookiePair(await register(handle, uniqueName()));
+  const cookieB = cookiePair(await register(handle, uniqueName()));
+  assert.equal((await call(handle, ctx('/api/assessments', { cookie: cookieA }))).body.total, 0);
+
+  await submit(handle, cookieA, allAnswers(2));
+  await tick();
+  await mbtiSubmit(handle, cookieA, mbtiAll(0));
+
+  const listA = await call(handle, ctx('/api/assessments', { cookie: cookieA }));
+  assert.equal(listA.body.total, 2);
+  assert.equal(listA.body.items[0].kind, 'mbti');
+  assert.equal(listA.body.items[0].code, 'ESTJ');
+  assert.deepEqual(listA.body.items[0].top_types, ['ESTJ']);
+  assert.equal(listA.body.items[1].kind, 'riasec');
+  assert.deepEqual(listA.body.items[1].scores, { R: 10, I: 10, A: 10, S: 10, E: 10, C: 10 });
+  assert.deepEqual(listA.body.items[1].top_types, ['R', 'I', 'A']);
+  const listB = await call(handle, ctx('/api/assessments', { cookie: cookieB }));
+  assert.equal(listB.body.total, 0, 'B 看不到 A 的测评记录');
+});
+
+// ---- 模块3：首页统计（真实计数，空数据与触顶如实显示） ----
+
+test('首页统计：公开读；未登录个人计数为 null；计数反映真实行数与导入元数据', async () => {
+  const { db, handle } = fixture();
+
+  const anon = await call(handle, ctx('/api/stats'));
+  assert.equal(anon.status, 200);
+  assert.deepEqual(anon.body.stats, {
+    resources_total: 0,
+    resources_capped: false,
+    universities_total: null,
+    favorites_count: null,
+    favorites_capped: false,
+    assessments_count: null,
+    assessments_capped: false,
+  });
+
+  const created = await register(handle, uniqueName());
+  const cookie = cookiePair(created);
+  const userId = created.body.user.id;
+  const mine = await call(handle, ctx('/api/stats', { cookie }));
+  assert.deepEqual(mine.body.stats, {
+    resources_total: 0,
+    resources_capped: false,
+    universities_total: null,
+    favorites_count: 0,
+    favorites_capped: false,
+    assessments_count: 0,
+    assessments_capped: false,
+  });
+
+  // 直接向假数据库写入行，验证计数逻辑（各写入接口在各自测试里覆盖）。
+  await db.from('resources').insertIfAbsent({ id: 'r1', title: '资料一' }, { onConflict: 'id' });
+  await db.from('resources').insertIfAbsent({ id: 'r2', title: '资料二' }, { onConflict: 'id' });
+  await db.from('data_meta').insertIfAbsent({
+    key: 'counts',
+    value: JSON.stringify({ universities: 2400, admission_scores: 11005, enrollment_plans: 183493 }),
+  }, { onConflict: 'key' });
+  await db.from('favorites').insertIfAbsent(
+    { user_id: userId, resource_id: 'r1', created_at: new Date().toISOString(), revoked_at: null },
+    { onConflict: 'user_id,resource_id' },
+  );
+  await db.from('favorites').insertIfAbsent(
+    { user_id: userId, resource_id: 'r2', revoked_at: new Date().toISOString(), created_at: new Date().toISOString() },
+    { onConflict: 'user_id,resource_id' },
+  );
+  await db.from('assessments').insertIfAbsent(
+    { id: 'a1', user_id: userId, kind: 'riasec', answers: '[]', scores: '{}', code: 'RIA', created_at: new Date().toISOString() },
+    { onConflict: 'id' },
+  );
+
+  const counted = await call(handle, ctx('/api/stats', { cookie }));
+  assert.deepEqual(counted.body.stats, {
+    resources_total: 2,
+    resources_capped: false,
+    universities_total: 2400,
+    favorites_count: 1, // 已取消收藏的那条不计入
+    favorites_capped: false,
+    assessments_count: 1,
+    assessments_capped: false,
+  });
+
+  // 别人的收藏不计入自己的统计；错误方法 405。
+  const other = await register(handle, uniqueName());
+  const otherStats = await call(handle, ctx('/api/stats', { cookie: cookiePair(other) }));
+  assert.equal(otherStats.body.stats.favorites_count, 0);
+  assert.equal(otherStats.body.stats.assessments_count, 0);
+  assert.equal((await call(handle, ctx('/api/stats', { method: 'POST', body: {} }))).status, 405);
+});
+
+test('首页统计：计数触顶如实报告 capped，不把截断值当真实总数', async () => {
+  const { db, handle } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const userId = (await me(handle, cookie)).body.user.id;
+  const batch = Array.from({ length: 500 }, (_, i) => ({ id: `r${i}`, title: `资料${i}` }));
+  await db.from('resources').insertIfAbsent(batch, { onConflict: 'id' });
+  const favs = Array.from({ length: 500 }, (_, i) => ({
+    user_id: userId, resource_id: `r${i}`, created_at: new Date().toISOString(), revoked_at: null,
+  }));
+  await db.from('favorites').insertIfAbsent(favs, { onConflict: 'user_id,resource_id' });
+
+  const s = (await call(handle, ctx('/api/stats', { cookie }))).body.stats;
+  assert.equal(s.resources_total, 500);
+  assert.equal(s.resources_capped, true);
+  assert.equal(s.favorites_count, 500);
+  assert.equal(s.favorites_capped, true);
+});
+
+test('模块4文件：上传需登录，类型/大小/路径校验，存储路径由会话派生', async () => {
+  const storage = createFakeStorage();
+  const { handle } = fixture(storage);
+  assert.equal((await uploadUrl(handle, null, { file_name: 'a.pdf', file_size: 10 })).status, 401);
+
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const userId = (await me(handle, cookie)).body.user.id;
+  const ok = await uploadUrl(handle, cookie, { file_name: '讲义.pdf', file_size: 1024 });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.contentType, 'application/pdf');
+  assert.equal(ok.body.maxBytes, FILE_MAX_BYTES);
+  assert.ok(ok.body.storageKey.startsWith(`resources/${await sha256Hex(userId)}/`), '目录段必须是会话用户 ID 的摘要');
+  assert.ok(ok.body.storageKey.endsWith('.pdf'));
+  assert.ok(ok.body.uploadUrl.includes(ok.body.storageKey));
+
+  assert.equal((await uploadUrl(handle, cookie, { file_name: 'evil.exe', file_size: 10 })).body.error, 'unsupported_file_type');
+  assert.equal((await uploadUrl(handle, cookie, { file_name: 'a.pdf', file_size: FILE_MAX_BYTES + 1 })).body.error, 'file_too_large');
+  assert.equal((await uploadUrl(handle, cookie, { file_name: 'a.pdf', file_size: 0 })).body.error, 'invalid_file');
+  assert.equal((await uploadUrl(handle, cookie, { file_name: '../escape.pdf', file_size: 10 })).body.error, 'invalid_file');
+  assert.equal((await uploadUrl(handle, cookie, { file_name: 'noext', file_size: 10 })).body.error, 'unsupported_file_type');
+  assert.equal((await call(handle, ctx('/api/resources/upload-url', { cookie }))).status, 405);
+});
+
+test('模块4文件：上传→回读校验→登记→下载全流程，落库取实测值', async () => {
+  const storage = createFakeStorage();
+  const { handle, db } = fixture(storage);
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const userId = (await me(handle, cookie)).body.user.id;
+
+  const intent = await uploadUrl(handle, cookie, { file_name: '笔记.txt', file_size: 2048 });
+  const key = intent.body.storageKey;
+  storage.put(key, bytesOf(2048), 'text/plain'); // 模拟浏览器 PUT 到签名 URL
+  const created = await finalizeFile(handle, cookie, {
+    ...FILE_BODY, storage_key: key, file_name: '笔记.txt', file_size: 2048,
+    owner_id: '00000000-0000-0000-0000-000000000000',
+  });
+  assert.equal(created.status, 201);
+  const res = created.body.resource;
+  assert.equal(res.has_file, true);
+  assert.equal(res.file_name, '笔记.txt');
+  assert.equal(res.file_size, 2048);
+  assert.equal(res.mime, 'text/plain');
+  assert.equal(res.source_url, '');
+  assert.equal(res.owner_id, userId, '归属只来自会话');
+  assert.ok(!('storage_key' in res), '存储路径不暴露给浏览器');
+  assert.equal(db.dump('resources')[0].storage_key, key);
+
+  // 下载：登录用户（含他人，共享资料库）可签发；匿名拒绝。
+  const dl = await call(handle, ctx(`/api/resources/${res.id}/file`, { cookie }));
+  assert.equal(dl.status, 200);
+  assert.ok(dl.body.downloadUrl.includes(key));
+  assert.equal(dl.body.file_name, '笔记.txt');
+  const cookieB = cookiePair(await register(handle, uniqueName()));
+  assert.equal((await call(handle, ctx(`/api/resources/${res.id}/file`, { cookie: cookieB }))).status, 200);
+  assert.equal((await call(handle, ctx(`/api/resources/${res.id}/file`))).status, 401);
+  assert.equal((await call(handle, ctx(`/api/resources/${res.id}/file`, { method: 'POST', cookie }))).status, 405);
+
+  // 链接型资料没有文件可下载。
+  const link = await call(handle, ctx('/api/resources', { method: 'POST', cookie, body: { ...FILE_BODY, source_url: 'https://example.edu.cn/x' } }));
+  assert.equal((await call(handle, ctx(`/api/resources/${link.body.resource.id}/file`, { cookie }))).body.error, 'file_not_found');
+});
+
+test('模块4文件：归属与回读校验拒绝非法登记，失败不落库并清理对象', async () => {
+  const storage = createFakeStorage();
+  const { handle, db } = fixture(storage);
+  const cookieA = cookiePair(await register(handle, uniqueName()));
+  const cookieB = cookiePair(await register(handle, uniqueName()));
+  const intentA = await uploadUrl(handle, cookieA, { file_name: 'a.pdf', file_size: 100 });
+  const keyA = intentA.body.storageKey;
+
+  // B 不能登记签发给 A 的对象（前缀不匹配）。
+  storage.put(keyA, bytesOf(100), 'application/pdf');
+  assert.equal((await finalizeFile(handle, cookieB, { ...FILE_BODY, storage_key: keyA, file_name: 'a.pdf', file_size: 100 })).body.error, 'file_forbidden');
+
+  // 篡改 / 穿越路径一律拒绝。
+  assert.equal((await finalizeFile(handle, cookieA, { ...FILE_BODY, storage_key: 'resources/../x.pdf', file_name: 'a.pdf', file_size: 100 })).body.error, 'invalid_file');
+  assert.equal((await finalizeFile(handle, cookieA, { ...FILE_BODY, storage_key: 'other/dir/a.pdf', file_name: 'a.pdf', file_size: 100 })).body.error, 'invalid_file');
+
+  // 大小不符：声明 100 实际 200 → 拒绝、清理对象、不落库。
+  const mismatch = await uploadUrl(handle, cookieA, { file_name: 'm.pdf', file_size: 100 });
+  storage.put(mismatch.body.storageKey, bytesOf(200), 'application/pdf');
+  const mRes = await finalizeFile(handle, cookieA, { ...FILE_BODY, storage_key: mismatch.body.storageKey, file_name: 'm.pdf', file_size: 100 });
+  assert.equal(mRes.body.error, 'file_validation_failed');
+  assert.equal(storage.has(mismatch.body.storageKey), false, '校验失败应清理已上传对象');
+
+  // MIME 不符：声明 pdf 实际存成 html → 拒绝。
+  const mime = await uploadUrl(handle, cookieA, { file_name: 't.pdf', file_size: 100 });
+  storage.put(mime.body.storageKey, bytesOf(100), 'text/html');
+  assert.equal((await finalizeFile(handle, cookieA, { ...FILE_BODY, storage_key: mime.body.storageKey, file_name: 't.pdf', file_size: 100 })).body.error, 'file_validation_failed');
+
+  // 从未上传（对象不存在）→ 拒绝。
+  const absent = await uploadUrl(handle, cookieA, { file_name: 'n.pdf', file_size: 100 });
+  assert.equal((await finalizeFile(handle, cookieA, { ...FILE_BODY, storage_key: absent.body.storageKey, file_name: 'n.pdf', file_size: 100 })).body.error, 'file_validation_failed');
+
+  // 扩展名与存储路径不一致 → 拒绝。
+  const ext = await uploadUrl(handle, cookieA, { file_name: 'e.pdf', file_size: 100 });
+  storage.put(ext.body.storageKey, bytesOf(100), 'application/pdf');
+  assert.equal((await finalizeFile(handle, cookieA, { ...FILE_BODY, storage_key: ext.body.storageKey, file_name: 'e.txt', file_size: 100 })).body.error, 'invalid_file');
+
+  assert.equal(db.dump('resources').length, 0, '所有非法登记都不得落库');
+});
+
+test('模块4文件：固定来源校验（CSRF）覆盖上传与登记', async () => {
+  const storage = createFakeStorage();
+  const { handle } = fixture(storage);
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const evil = await call(handle, ctx('/api/resources/upload-url', { method: 'POST', cookie, origin: 'https://evil.test', body: { file_name: 'a.pdf', file_size: 10 } }));
+  assert.equal(evil.status, 403);
+  assert.equal(evil.body.error, 'origin_forbidden');
 });
