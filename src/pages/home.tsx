@@ -1,7 +1,7 @@
 // 首页 / 学习仪表盘：统计数字来自后端 /api/stats 的真实计数（资料总数、
 // 高校收录、登录后的收藏与测评数），空数据如实显示「暂无数据」，不再展示
 // 演示数字。今日任务保存在本机浏览器（localStorage），首次访问以示例任务
-// 起步。个性化推荐仍是演示内容，保留「演示数据」标签。
+// 起步。个性化推荐来自 /api/recommendations 的真实数据（规则匹配，无 AI）。
 import { useEffect, useState } from "react";
 import {
   ArrowRight,
@@ -20,17 +20,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { DemoBadge } from "@/src/components/demo-badge";
 import { Link } from "@/src/lib/router";
 import { useAuth } from "@/src/lib/auth";
 import { errorMessage } from "@/src/lib/api";
-import {
-  DEMO_RECOMMENDATIONS,
-  DEMO_TASKS,
-  GROWTH_TIPS,
-} from "@/src/lib/demo";
+import { DEMO_TASKS, GROWTH_TIPS } from "@/src/lib/demo";
 import { fetchStats } from "@/src/lib/stats";
 import type { HomeStats } from "@/src/lib/stats";
+import { fetchRecommendations } from "@/src/lib/recommendations";
+import type { Recommendation } from "@/src/lib/recommendations";
 import { cn } from "@/lib/utils";
 
 function greeting(): string {
@@ -74,9 +71,11 @@ function statValue(value: number | null, unit: string, emptyText: string): strin
 }
 
 export default function HomePage() {
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
   const [stats, setStats] = useState<HomeStats | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const [recs, setRecs] = useState<Recommendation[] | null>(null);
+  const [recsError, setRecsError] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks());
   const [newTaskText, setNewTaskText] = useState("");
   const [newTaskSubject, setNewTaskSubject] = useState(TASK_SUBJECTS[1]);
@@ -95,6 +94,23 @@ export default function HomePage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    setRecs(null);
+    setRecsError(null);
+    fetchRecommendations()
+      .then((data) => {
+        if (!cancelled) setRecs(data.items);
+      })
+      .catch((err) => {
+        if (!cancelled) setRecsError(errorMessage(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, loading]);
 
   useEffect(() => {
     try {
@@ -328,24 +344,44 @@ export default function HomePage() {
       <section aria-labelledby="recommend-title">
         <div className="mb-3 flex items-center gap-2">
           <h2 id="recommend-title" className="text-lg font-semibold">个性化推荐</h2>
-          <DemoBadge />
         </div>
-        <div className="grid gap-3 md:grid-cols-3">
-          {DEMO_RECOMMENDATIONS.map((item) => (
-            <Card key={item.id}>
-              <CardContent className="flex flex-col gap-2 p-5">
-                <div className="flex items-center gap-2">
-                  <Badge variant="secondary">{item.subject}</Badge>
-                  <Badge variant="outline">{item.grade}</Badge>
-                </div>
-                <p className="text-sm font-medium leading-snug">{item.title}</p>
-                <p className="text-xs text-muted-foreground">{item.reason}</p>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
+        {recsError ? (
+          <p className="text-sm text-muted-foreground">
+            推荐暂时无法加载（{recsError}），请稍后刷新重试。
+          </p>
+        ) : recs === null ? (
+          <p className="text-sm text-muted-foreground">加载中…</p>
+        ) : recs.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            暂无数据：资料库还没有可推荐的资料{user ? "，你设置的省份也暂无录取数据" : ""}。
+            可以先去<Link to="/resources" className="mx-1 text-primary underline">学习资料库</Link>
+            登记资料，或到<Link to="/universities" className="mx-1 text-primary underline">高校查询</Link>
+            浏览已导入的官方数据。
+          </p>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-3">
+            {recs.map((item) => (
+              <Link key={`${item.kind}-${item.id}`} to={item.link} className="group">
+                <Card className="h-full transition-colors group-hover:border-primary/40">
+                  <CardContent className="flex flex-col gap-2 p-5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {item.badges.map((badge) => (
+                        <Badge key={badge} variant="secondary">{badge}</Badge>
+                      ))}
+                      <Badge variant="outline">{item.kind === "resource" ? "学习资料" : "高校"}</Badge>
+                    </div>
+                    <p className="text-sm font-medium leading-snug group-hover:text-primary">{item.title}</p>
+                    <p className="text-xs text-muted-foreground">{item.reason}</p>
+                  </CardContent>
+                </Card>
+              </Link>
+            ))}
+          </div>
+        )}
         <p className="mt-2 text-xs text-muted-foreground">
-          登录后将根据你填写的年级、学科和省份生成真实推荐。
+          {user
+            ? "推荐按你在个人中心填写的年级、选科和省份，从资料库与官方录取数据中规则匹配；未填写的部分展示最新收录。"
+            : "推荐来自资料库与官方录取数据的真实内容；登录并填写年级、选科和省份后，将按你的资料匹配。"}
         </p>
       </section>
 

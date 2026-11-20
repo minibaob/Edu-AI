@@ -15,6 +15,7 @@ import {
   computeResult as computeMbti, publicResult as mbtiPublicResult, validateAnswers as validateMbtiAnswers,
 } from './mbti.mjs';
 import { importChunk, listUniversities as listUniversitiesIndex, readMeta, universityDetail as fetchUniversityDetail, updateMeta } from './universities.mjs';
+import { listRecommendations } from './recommendations.mjs';
 import { FILE_MAX_BYTES, assertOwnedKey, storageKeyFor, validateUploadIntent } from './resource-files.mjs';
 import { verifyUploadedObject } from './storage-validation.mjs';
 import { hashPassword, verifyPassword, verifyPasswordAgainstDummy } from './passwords.mjs';
@@ -634,6 +635,7 @@ async function route(db, request, origin, storage) {
 
   if (path === '/api/health' && request.method === 'GET') return json({ ok: true });
   if (path === '/api/stats' && request.method === 'GET') return stats(db, request);
+  if (path === '/api/recommendations' && request.method === 'GET') return listRecommendations(db, request);
   if (path === '/api/register' && request.method === 'POST') return register(db, request);
   if (path === '/api/login' && request.method === 'POST') return login(db, request);
   if (path === '/api/logout' && request.method === 'POST') return logout(db, request);
@@ -740,7 +742,7 @@ async function route(db, request, origin, storage) {
     return updateMeta(db, request);
   }
 
-  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health', '/api/universities', '/api/majors', '/api/resources', '/api/resources/upload-url', '/api/favorites', '/api/assessments', '/api/stats', '/api/assessment/questions', '/api/assessment/submit', '/api/assessment/latest', '/api/mbti/questions', '/api/mbti/submit', '/api/mbti/latest', '/api/admin/import', '/api/admin/meta'].includes(path)
+  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health', '/api/universities', '/api/majors', '/api/resources', '/api/resources/upload-url', '/api/favorites', '/api/assessments', '/api/stats', '/api/recommendations', '/api/assessment/questions', '/api/assessment/submit', '/api/assessment/latest', '/api/mbti/questions', '/api/mbti/submit', '/api/mbti/latest', '/api/admin/import', '/api/admin/meta'].includes(path)
     || universityDetail || resourceDetail || resourceFileMatch || favoriteMatch) {
     throw new AppError('method_not_allowed', 405);
   }
