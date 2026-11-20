@@ -1315,3 +1315,53 @@ test('阶段8权限：请求体篡改 id/role/user_id 一律无效，归属只�
   assert.equal(pw.status, 200);
   assert.equal((await login(handle, b.body.user.username, PASSWORD)).status, 200, 'B 的口令不得被 A 的请求改动');
 });
+
+test('首页推荐：公开读；空库如实为空，匿名按最新真实资料推荐', async () => {
+  const { handle } = fixture();
+  const empty = await call(handle, ctx('/api/recommendations'));
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.body, { personalized: false, items: [] });
+
+  const { db, handle: h2 } = fixture();
+  await seedResource(db, null, { title: '旧资料', created_at: '2026-01-01T00:00:00.000Z' });
+  const newer = await seedResource(db, null, { title: '新资料', created_at: '2026-02-01T00:00:00.000Z' });
+  const res = await call(h2, ctx('/api/recommendations'));
+  assert.equal(res.status, 200);
+  assert.equal(res.body.personalized, false);
+  assert.equal(res.body.items.length, 2);
+  assert.equal(res.body.items[0].id, newer);
+  assert.equal(res.body.items[0].reason, '资料库最新收录');
+  assert.equal(res.body.items[0].link, `/resources?id=${newer}`);
+  assert.ok(res.body.items.every((item) => item.kind === 'resource'));
+});
+
+test('首页推荐：登录按年级/选科匹配真实资料，高校推荐来自本省真实录取行', async () => {
+  const { db, handle } = fixture();
+  const reg = await register(handle, uniqueName('rec'), PASSWORD, { grade: '高二', province: '河北', subjects: ['数学'] });
+  assert.equal(reg.status, 201);
+  const cookie = cookiePair(reg);
+  const matchId = await seedResource(db, null, { title: '高二数学匹配资料', grade: '高二', subject: '数学', created_at: '2026-01-01T00:00:00.000Z' });
+  await seedResource(db, null, { title: '不相关最新资料', grade: '高一', subject: '英语', created_at: '2026-03-01T00:00:00.000Z' });
+
+  // 该省还没有录取数据时不出高校推荐，不编造。
+  const before = await call(handle, ctx('/api/recommendations', { cookie }));
+  assert.equal(before.body.personalized, true);
+  assert.equal(before.body.items.length, 2);
+  assert.ok(before.body.items.every((item) => item.kind === 'resource'));
+
+  await db.from('admission_scores').insertIfAbsent({ id: crypto.randomUUID(), ...SCORE_ROW, province: '河北' }, { onConflict: 'id' });
+  const res = await call(handle, ctx('/api/recommendations', { cookie }));
+  assert.equal(res.body.items[0].id, matchId);
+  assert.equal(res.body.items[0].reason, '匹配你的年级「高二」与选科「数学」');
+  const uni = res.body.items.find((item) => item.kind === 'university');
+  assert.ok(uni, '有本省真实录取行时应出高校推荐');
+  assert.equal(uni.title, SCORE_ROW.school_name);
+  assert.equal(uni.link, `/universities/${SCORE_ROW.university_code}`);
+  assert.equal(uni.reason, '在你设置的省份「河北」有历年录取数据');
+
+  // 匿名在同一库上：无个性化、无高校推荐，仍按最新真实资料。
+  const anon = await call(handle, ctx('/api/recommendations'));
+  assert.equal(anon.body.personalized, false);
+  assert.ok(anon.body.items.every((item) => item.kind === 'resource'));
+  assert.equal(anon.body.items[0].title, '不相关最新资料');
+});

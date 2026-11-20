@@ -15,30 +15,6 @@ export const DEMO_TASKS = [
   { id: "t4", text: "阅读语文素材：人物传记一则", subject: "语文", done: false },
 ];
 
-export const DEMO_RECOMMENDATIONS = [
-  {
-    id: "r1",
-    title: "高中数学函数专题讲义（示例）",
-    subject: "数学",
-    grade: "高一",
-    reason: "根据演示年级「高一」推荐",
-  },
-  {
-    id: "r2",
-    title: "英语阅读理解技巧清单（示例）",
-    subject: "英语",
-    grade: "高一",
-    reason: "根据演示学科偏好推荐",
-  },
-  {
-    id: "r3",
-    title: "河北省高考政策解读（示例）",
-    subject: "升学",
-    grade: "通用",
-    reason: "根据演示省份「河北」推荐",
-  },
-];
-
 export const GROWTH_TIPS = [
   "把大目标拆成每天 30 分钟的小任务，坚持比突击更有效。",
   "整理错题时写下「当时为什么错」，比抄一遍答案更有用。",
