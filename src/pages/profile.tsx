@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { Compass, Heart, KeyRound, LogIn, Save, User } from "lucide-react";
+import { BookOpen, Compass, Heart, KeyRound, LogIn, Save, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -12,6 +12,8 @@ import { ApiError, api, errorMessage } from "@/src/lib/api";
 import { Link } from "@/src/lib/router";
 import { GRADES, PROVINCES, SUBJECTS } from "@/src/lib/options";
 import { cn } from "@/lib/utils";
+import { wrongQuestionsClient, isWrongQuestionSessionError } from "@/src/lib/wrong-questions";
+import type { WrongQuestionStats } from "@/src/lib/wrong-questions";
 
 // 维度中文名与模块 6 的 src/lib/assessment.ts 的 DIMENSIONS 一致；合并模块 6 后
 // 应改为直接引用那一处，避免两处维护。
@@ -48,6 +50,52 @@ type SectionState = "loading" | "ready" | "unavailable" | "error";
 
 const selectClass =
   "h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50";
+
+// Kept separate and keyed by user ID: an account switch never renders old counts.
+function WrongQuestionStatsCard({ userId }: { userId: string }) {
+  const [stats, setStats] = useState<WrongQuestionStats | null>(null);
+  const [error, setError] = useState("");
+  const [sessionChanged, setSessionChanged] = useState(false);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setStats(null);
+    setError("");
+    setSessionChanged(false);
+    wrongQuestionsClient.stats(userId).then((data) => {
+      if (!cancelled) setStats(data);
+    }).catch((reason: unknown) => {
+      if (cancelled) return;
+      setError(errorMessage(reason));
+      setSessionChanged(isWrongQuestionSessionError(reason));
+    });
+    return () => { cancelled = true; };
+  }, [userId, retry]);
+  return <Card>
+    <CardHeader>
+      <CardTitle className="flex items-center gap-2 text-lg"><BookOpen className="size-5" aria-hidden />我的错题本</CardTitle>
+      <CardDescription>整理题目与错因，手动记录复习。新错题默认私密。</CardDescription>
+    </CardHeader>
+    <CardContent className="flex flex-col gap-4">
+      {!stats && !error && <p role="status" className="text-sm text-muted-foreground">正在加载错题统计…</p>}
+      {error && <Alert variant="destructive"><AlertDescription className="flex flex-col items-start gap-2">
+        <p>{error}</p>
+        <Button variant="outline" size="sm" onClick={() => {
+          if (sessionChanged) window.location.reload();
+          else { setError(""); setStats(null); setRetry((value) => value + 1); }
+        }}>{sessionChanged ? "刷新页面确认账号" : "重试读取统计"}</Button>
+      </AlertDescription></Alert>}
+      {stats && <>
+        <dl className="grid grid-cols-2 gap-3">
+          <div className="rounded-lg bg-muted p-4"><dt className="text-sm text-muted-foreground">错题总数</dt><dd className="mt-1 text-2xl font-semibold">{stats.total} <span className="text-sm font-normal">道</span></dd></div>
+          <div className="rounded-lg bg-muted p-4"><dt className="text-sm text-muted-foreground">待复习</dt><dd className="mt-1 text-2xl font-semibold">{stats.todo} <span className="text-sm font-normal">道</span></dd></div>
+        </dl>
+        {stats.total === 0 && <p className="text-sm text-muted-foreground">还没有错题记录，先整理一道遇到的错题吧。</p>}
+      </>}
+      <Button asChild variant="outline" className="self-start"><Link to="/wrong-questions">进入我的错题本</Link></Button>
+    </CardContent>
+  </Card>;
+}
 
 export default function ProfilePage() {
   const { user, loading, backendAvailable, logout, updateProfile, changePassword } = useAuth();
@@ -343,6 +391,8 @@ export default function ProfilePage() {
           </Card>
         </div>
       </div>
+
+      <WrongQuestionStatsCard key={user.id} userId={user.id} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>

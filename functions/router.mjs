@@ -21,6 +21,7 @@ import { verifyUploadedObject } from './storage-validation.mjs';
 import { hashPassword, verifyPassword, verifyPasswordAgainstDummy } from './passwords.mjs';
 import { SESSION_TTL_MS, clearSessionCookie, createSession, revokeSession, sessionCookie, validateSession } from './sessions.mjs';
 import { consume } from './limiter.mjs';
+import { createWrongQuestion, deleteWrongQuestion, getWrongQuestion, listWrongQuestions, reviewWrongQuestion, updateWrongQuestion, wrongQuestionStats } from './wrong-questions.mjs';
 
 const SESSION_TTL_SECONDS = Math.floor(SESSION_TTL_MS / 1000);
 const encoder = new TextEncoder();
@@ -655,17 +656,43 @@ async function route(db, request, origin, storage) {
     return changePassword(db, request, session);
   }
 
+  if (path === '/api/wrong-questions' || path.startsWith('/api/wrong-questions/')) {
+    const session = await requireSession(db, request);
+    if (path === '/api/wrong-questions') {
+      if (request.method === 'GET') return listWrongQuestions(db, request, session);
+      if (request.method === 'POST') return createWrongQuestion(db, request, session);
+      throw new AppError('method_not_allowed', 405);
+    }
+    if (path === '/api/wrong-questions/public' || path === '/api/wrong-questions/stats') {
+      if (request.method !== 'GET') throw new AppError('method_not_allowed', 405);
+      return path.endsWith('/public') ? listWrongQuestions(db, request, session, true) : wrongQuestionStats(db, session);
+    }
+    const match = path.match(/^\/api\/wrong-questions\/([^/]+)(\/review)?$/);
+    if (!match) throw new AppError('not_found', 404);
+    if (match[2]) {
+      if (request.method === 'POST') return reviewWrongQuestion(db, session, match[1]);
+    } else {
+      if (request.method === 'GET') return getWrongQuestion(db, session, match[1]);
+      if (request.method === 'PATCH') return updateWrongQuestion(db, request, session, match[1]);
+      if (request.method === 'DELETE') return deleteWrongQuestion(db, session, match[1]);
+    }
+    throw new AppError('method_not_allowed', 405);
+  }
+
   // 模块5：匿名只读查询（院校索引存 data_meta，前端做搜索/分页；详情按学校名称关联计划）。
   if (path === '/api/universities' && request.method === 'GET') return listUniversitiesIndex(db);
   const universityDetail = path.match(/^\/api\/universities\/([A-Za-z0-9]{1,32})$/);
   if (universityDetail && request.method === 'GET') {
-    const yearParam = new URL(request.url).searchParams.get('year');
+    const params = new URL(request.url).searchParams;
+    const yearParam = params.get('year');
+    const province = params.get('province');
+    if (province !== null && !['河北', '河南'].includes(province)) throw new AppError('invalid_input', 400);
     let planYear = null;
     if (yearParam !== null) {
       if (!/^\d{4}$/.test(yearParam)) throw new AppError('invalid_input', 400);
       planYear = Number(yearParam);
     }
-    return fetchUniversityDetail(db, universityDetail[1], planYear);
+    return fetchUniversityDetail(db, universityDetail[1], planYear, province);
   }
   if (path === '/api/majors' && request.method === 'GET') return listMajors(db, request);
   if (path === '/api/resources' && request.method === 'GET') return listResources(db, request);

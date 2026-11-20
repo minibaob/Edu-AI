@@ -57,6 +57,218 @@ const login = (handle, username, password = PASSWORD) => call(handle, ctx('/api/
 const me = (handle, cookie) => call(handle, ctx('/api/me', { cookie }));
 const uniqueName = (prefix = 'user') => `${prefix}${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`;
 
+const WRONG_QUESTION = {
+  subject: '数学', grade: '高二', chapter: '函数', source: '练习',
+  question: '本地测试题：2 + 3 = ?', correct_answer: '5', my_answer: '4', reason: '计算失误', note: '本地合成测试数据',
+};
+const wrongPath = '/api/wrong-questions';
+const newWrong = (handle, cookie, extra = {}) => call(handle, ctx(wrongPath, { method: 'POST', cookie, body: { ...WRONG_QUESTION, ...extra } }));
+
+test('模块10：所有私有与公开接口均需会话，未登录写操作401，CSRF不放行', async () => {
+  const { handle, db } = fixture();
+  const id = crypto.randomUUID();
+  for (const [path, method] of [[wrongPath, 'GET'], [wrongPath, 'POST'], [`${wrongPath}/public`, 'GET'], [`${wrongPath}/stats`, 'GET'], [`${wrongPath}/${id}`, 'GET'], [`${wrongPath}/${id}`, 'PATCH'], [`${wrongPath}/${id}`, 'DELETE'], [`${wrongPath}/${id}/review`, 'POST']]) {
+    assert.equal((await call(handle, ctx(path, { method, ...(['POST', 'PATCH'].includes(method) ? { body: WRONG_QUESTION } : {}) }))).status, 401);
+  }
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const created = await newWrong(handle, cookie);
+  for (const [path, method] of [[wrongPath, 'POST'], [`${wrongPath}/${created.body.item.id}`, 'PATCH'], [`${wrongPath}/${created.body.item.id}`, 'DELETE'], [`${wrongPath}/${created.body.item.id}/review`, 'POST']]) {
+    assert.equal((await call(handle, ctx(path, { method, cookie, origin: 'https://evil.test', ...(method === 'DELETE' ? {} : { body: WRONG_QUESTION }) }))).status, 403);
+  }
+  assert.equal(db.dump('wrong_questions').length, 1);
+  assert.equal((await call(handle, ctx(`${wrongPath}/public`, { method: 'POST', cookie, body: {} }))).status, 405);
+});
+
+test('模块10：归属只认会话，默认私有，A/B详情修改删除复习隔离', async () => {
+  const { handle, db } = fixture();
+  const a = await register(handle, uniqueName()), b = await register(handle, uniqueName());
+  const ca = cookiePair(a), cb = cookiePair(b);
+  const created = await newWrong(handle, ca, { user_id: b.body.user.id, owner_id: b.body.user.id, review_count: 90, status: 'done' });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.user_id, a.body.user.id);
+  assert.equal(created.body.item.user_id, a.body.user.id);
+  assert.equal(created.body.item.status, 'todo');
+  assert.equal(created.body.item.visibility, 'private');
+  assert.equal(created.body.item.review_count, 0);
+  assert.equal(created.body.item.last_reviewed_at, null);
+  const path = `${wrongPath}/${created.body.item.id}`;
+  for (const [target, method, body] of [[path, 'GET'], [path, 'PATCH', { note: '篡改' }], [path, 'DELETE'], [`${path}/review`, 'POST']]) {
+    assert.equal((await call(handle, ctx(target, { cookie: cb, method, body }))).status, 404);
+  }
+  assert.equal((await call(handle, ctx(`${wrongPath}?user_id=${a.body.user.id}`, { cookie: cb }))).body.total, 0);
+  assert.deepEqual((await call(handle, ctx(`${wrongPath}/stats`, { cookie: cb }))).body, { user_id: b.body.user.id, total: 0, todo: 0 });
+  assert.equal(db.dump('wrong_questions')[0].note, WRONG_QUESTION.note);
+  assert.equal((await call(handle, ctx(path, { cookie: ca }))).status, 200);
+});
+
+test('模块10：提交时账号一致性前置条件，跨标签页换号不可写入旧账号草稿', async () => {
+  const { handle, db } = fixture();
+  const a = await register(handle, uniqueName()), b = await register(handle, uniqueName());
+  const ca = cookiePair(a), cb = cookiePair(b);
+  assert.equal((await call(handle, ctx(`${wrongPath}/stats`, { cookie: ca }))).body.user_id, a.body.user.id);
+  const changed = await newWrong(handle, cb, { expected_user_id: a.body.user.id, user_id: a.body.user.id });
+  assert.equal(changed.status, 409);
+  assert.equal(changed.body.error, 'wrong_question_session_changed');
+  assert.equal(db.dump('wrong_questions').length, 0);
+  const valid = await newWrong(handle, cb, { expected_user_id: b.body.user.id, user_id: a.body.user.id });
+  assert.equal(valid.status, 201);
+  assert.equal(valid.body.item.user_id, b.body.user.id);
+});
+
+test('模块10：字段长度、对象形状、错因/状态/来源/学科白名单与公开确认', async () => {
+  const { handle } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  for (const extra of [{ subject: '其他' }, { source: '自动生成' }, { reason: 'unknown' }, { grade: '初一' }, { question: '' }, { question: ' '.repeat(3) }, { question: '题'.repeat(5001) }, { correct_answer: '答'.repeat(3001) }, { my_answer: null }, { my_answer: '答'.repeat(3001) }, { chapter: '章'.repeat(101) }, { note: '注'.repeat(2001) }, { visibility: 'public' }]) {
+    assert.equal((await newWrong(handle, cookie, extra)).status, 400, JSON.stringify(Object.keys(extra)));
+  }
+  for (const body of [null, [], 'text']) assert.equal((await call(handle, ctx(wrongPath, { method: 'POST', cookie, body }))).status, 400);
+  const created = await newWrong(handle, cookie, { chapter: null, grade: null, note: null });
+  const path = `${wrongPath}/${created.body.item.id}`;
+  for (const body of [{ status: 'unknown' }, { reason: 'unknown' }, { visibility: 'friends' }, { visibility: 'public' }, { visibility: 'public', public_confirmed: 'true' }, { note: 'n'.repeat(2001) }, { user_id: crypto.randomUUID() }, { review_count: 100 }, {}, []]) {
+    assert.equal((await call(handle, ctx(path, { method: 'PATCH', cookie, body }))).status, 400);
+  }
+  const updated = await call(handle, ctx(path, { method: 'PATCH', cookie, body: { status: 'reviewing', reason: '概念不清', note: '' } }));
+  assert.equal(updated.status, 200);
+  assert.equal(updated.body.item.status, 'reviewing');
+  assert.equal(updated.body.item.reason, '概念不清');
+  assert.equal(updated.body.item.note, null);
+  assert.equal((await call(handle, ctx(`${wrongPath}/bad-id`, { cookie }))).status, 404);
+  const oversized = await newWrong(handle, cookie, { question: 'x'.repeat(70000) });
+  assert.equal(oversized.status, 413);
+});
+
+test('模块10：数据库内筛选分页、稳定排序、超过500条的真实总数与待复习数', async () => {
+  const { handle, db } = fixture();
+  const a = await register(handle, uniqueName()), b = await register(handle, uniqueName());
+  const cookie = cookiePair(a);
+  const rows = Array.from({ length: 507 }, (_, i) => ({
+    ...WRONG_QUESTION, id: crypto.randomUUID(), user_id: a.body.user.id, subject: i === 506 ? '英语' : '数学',
+    status: i < 505 ? 'todo' : 'done', visibility: 'private', review_count: 0, last_reviewed_at: null,
+    created_at: '2026-11-20T00:00:00.000Z',
+  }));
+  await db.from('wrong_questions').insertIfAbsent(rows, { onConflict: 'id' });
+  await newWrong(handle, cookiePair(b));
+  const first = await call(handle, ctx(`${wrongPath}?limit=20&offset=0`, { cookie }));
+  const second = await call(handle, ctx(`${wrongPath}?limit=20&offset=20`, { cookie }));
+  assert.equal(first.body.total, 507);
+  assert.equal(first.body.items.length, 20);
+  assert.equal(new Set([...first.body.items, ...second.body.items].map((r) => r.id)).size, 40);
+  assert.deepEqual(first.body.items.map((r) => r.id), [...rows].sort((a, b) => b.id.localeCompare(a.id)).slice(0, 20).map((r) => r.id));
+  const filtered = await call(handle, ctx(`${wrongPath}?subject=英语&chapter=函数&reason=计算失误&status=done`, { cookie }));
+  assert.equal(filtered.body.total, 1);
+  assert.equal(filtered.body.items[0].id, rows[506].id);
+  assert.equal((await call(handle, ctx(`${wrongPath}?chapter=未收录`, { cookie }))).body.total, 0);
+  const end = await call(handle, ctx(`${wrongPath}?offset=1000`, { cookie }));
+  assert.equal(end.body.total, 507);
+  assert.equal(end.body.items.length, 0);
+  assert.deepEqual((await call(handle, ctx(`${wrongPath}/stats`, { cookie }))).body, { user_id: a.body.user.id, total: 507, todo: 505 });
+  for (const query of ['status=bad', 'reason=bad', 'subject=bad', 'limit=0', 'limit=101', 'offset=-1', 'offset=NaN', 'offset=1.5', 'offset=9007199254740992']) {
+    assert.equal((await call(handle, ctx(`${wrongPath}?${query}`, { cookie }))).status, 400, query);
+  }
+});
+
+test('模块10：公开投影仅五字段，公开与撤回立即改变后续请求的可见性', async () => {
+  const { handle } = fixture();
+  const a = await register(handle, uniqueName()), b = await register(handle, uniqueName());
+  const ca = cookiePair(a), cb = cookiePair(b);
+  const created = await newWrong(handle, ca, { my_answer: 'PRIVATE_ANSWER', note: 'PRIVATE_NOTE' });
+  const path = `${wrongPath}/${created.body.item.id}`;
+  assert.equal((await call(handle, ctx(`${wrongPath}/public`, { cookie: cb }))).body.total, 0);
+  const publish = await call(handle, ctx(path, { method: 'PATCH', cookie: ca, body: { visibility: 'public', public_confirmed: true } }));
+  assert.equal(publish.status, 200);
+  const shared = await call(handle, ctx(`${wrongPath}/public`, { cookie: cb }));
+  assert.equal(shared.body.total, 1);
+  assert.deepEqual(Object.keys(shared.body.items[0]).sort(), ['subject', 'chapter', 'question', 'correct_answer', 'reason'].sort());
+  assert.ok(!JSON.stringify(shared.body).includes('PRIVATE_'));
+  assert.ok(!JSON.stringify(shared.body).includes(a.body.user.username));
+  assert.equal((await call(handle, ctx(path, { cookie: cb }))).status, 404, '公开不开放私有详情');
+  assert.equal((await call(handle, ctx(`${wrongPath}/public?subject=英语`, { cookie: cb }))).body.total, 0);
+  assert.equal((await call(handle, ctx(`${wrongPath}/public?status=todo`, { cookie: cb }))).status, 400);
+  assert.equal((await call(handle, ctx(path, { method: 'PATCH', cookie: ca, body: { visibility: 'private' } }))).status, 200);
+  assert.equal((await call(handle, ctx(`${wrongPath}/public`, { cookie: cb }))).body.total, 0);
+  assert.equal((await call(handle, ctx(path, { cookie: ca }))).body.item.my_answer, 'PRIVATE_ANSWER');
+});
+
+test('模块10：复习计数每次加一，并发条件更新不丢失，状态不自动变更', async () => {
+  const { handle, db } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const created = await newWrong(handle, cookie);
+  const path = `${wrongPath}/${created.body.item.id}`;
+  const reviewed = await call(handle, ctx(`${path}/review`, { method: 'POST', cookie, body: { review_count: 99 } }));
+  assert.equal(reviewed.status, 200);
+  assert.equal(reviewed.body.item.review_count, 1);
+  assert.equal(reviewed.body.item.status, 'todo');
+  assert.ok(Number.isFinite(Date.parse(reviewed.body.item.last_reviewed_at)));
+  const concurrent = await Promise.all(Array.from({ length: 6 }, () => call(handle, ctx(`${path}/review`, { method: 'POST', cookie }))));
+  assert.ok(concurrent.every((r) => r.status === 200));
+  assert.equal(db.dump('wrong_questions')[0].review_count, 7);
+  const marked = await call(handle, ctx(path, { method: 'PATCH', cookie, body: { status: 'done' } }));
+  assert.equal(marked.body.item.review_count, 7);
+  assert.equal((await call(handle, ctx(`${wrongPath}/stats`, { cookie }))).body.todo, 0);
+});
+
+test('模块10：删除真实移除记录并更新统计，其他用户不能删除', async () => {
+  const { handle, db } = fixture();
+  const a = await register(handle, uniqueName()), b = await register(handle, uniqueName());
+  const ca = cookiePair(a), cb = cookiePair(b);
+  const created = await newWrong(handle, ca);
+  const path = `${wrongPath}/${created.body.item.id}`;
+  assert.equal((await call(handle, ctx(path, { method: 'DELETE', cookie: cb }))).status, 404);
+  assert.equal((await call(handle, ctx(path, { method: 'DELETE', cookie: ca }))).status, 200);
+  assert.equal(db.dump('wrong_questions').length, 0);
+  assert.equal((await call(handle, ctx(path, { cookie: ca }))).status, 404);
+  assert.equal((await call(handle, ctx(path, { method: 'DELETE', cookie: ca }))).status, 404);
+  assert.equal((await call(handle, ctx(`${wrongPath}/stats`, { cookie: ca }))).body.total, 0);
+});
+
+test('模块10：创建修改复习删除的响应丢失不重放，明确拒绝不落库', async () => {
+  const { handle, db, control } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const countWrites = () => control.writes.filter((table) => table === 'wrong_questions').length;
+  control.dropTable = 'wrong_questions';
+  const beforeCreate = countWrites();
+  assert.equal((await newWrong(handle, cookie)).body.error, 'wrong_question_unconfirmed');
+  assert.equal(countWrites() - beforeCreate, 1);
+  assert.equal(db.dump('wrong_questions').length, 1);
+  const path = `${wrongPath}/${db.dump('wrong_questions')[0].id}`;
+  for (const [target, method, body] of [[path, 'PATCH', { status: 'reviewing' }], [`${path}/review`, 'POST'], [path, 'DELETE']]) {
+    control.dropTable = 'wrong_questions';
+    const before = countWrites();
+    const response = await call(handle, ctx(target, { cookie, method, body }));
+    assert.equal(response.status, 503);
+    assert.equal(response.body.error, 'wrong_question_unconfirmed');
+    assert.equal(countWrites() - before, 1);
+  }
+  assert.equal(db.dump('wrong_questions').length, 0);
+  control.rejectTable = 'wrong_questions';
+  assert.equal((await newWrong(handle, cookie)).status, 503);
+  assert.equal(db.dump('wrong_questions').length, 0);
+});
+
+test('模块10：计数缺失或数据库失败不可伪装为零', async () => {
+  const { handle, db } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  for (const fail of [false, true]) {
+    const wrapped = { from(table) {
+      const source = db.from(table);
+      if (table !== 'wrong_questions') return source;
+      return { ...source, select(...args) {
+        const query = source.select(...args);
+        const originalThen = query.then.bind(query);
+        query.then = (resolve, reject) => originalThen((result) => resolve(fail ? { error: { code: 'missing_table' } } : { ...result, count: null }), reject);
+        return query;
+      } };
+    } };
+    const broken = createApplication({ db: wrapped, origin: PUBLIC_ORIGIN });
+    for (const path of [wrongPath, `${wrongPath}/public`, `${wrongPath}/stats`]) {
+      const result = await call(broken, ctx(path, { cookie }));
+      assert.equal(result.status, 503);
+      assert.equal(result.body.error, 'database_unavailable');
+      assert.equal(result.body.total, undefined);
+    }
+  }
+});
+
 test('注册：规范化用户名、签发会话、只保存派生结果、资料默认为空', async () => {
   const { db, handle } = fixture();
   const created = await register(handle, '  Alpha_01  ');
@@ -846,6 +1058,34 @@ test('模块5：院校导入幂等（同 run+chunk 重试不重复）', async ()
   assert.equal(db.dump('universities').length, 2);
 });
 
+test('模块5：重导入补全基础信息（只补空列、不覆盖非空、计数不增）', async () => {
+  const { handle, cookie, db } = await adminFixture();
+  await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW]));
+  const filledRow = { ...UNIVERSITY_ROW, province: '北京', city: '北京市', type: '综合', level: '本科', tags: '985|211|双一流|公办', website: 'https://www.join-tsinghua.edu.cn' };
+  const fill = await postImport(handle, cookie, chunk('universities', [filledRow], 1));
+  assert.equal(fill.status, 200);
+  assert.equal(fill.body.inserted, 0);
+  assert.equal(fill.body.filled, 1);
+  const row = db.dump('universities').find((r) => r.code === '10003');
+  assert.equal(row.province, '北京');
+  assert.equal(row.website, 'https://www.join-tsinghua.edu.cn');
+  assert.equal(row.tags, '985|211|双一流|公办');
+  const counts = JSON.parse(db.dump('data_meta').find((r) => r.key === 'counts').value);
+  assert.equal(counts.universities, 1, '补全不新增计数');
+  // 已有非空值不被后续导入覆盖；空列仍可继续补。
+  const overwrite = await postImport(handle, cookie, chunk('universities', [{ ...filledRow, province: '上海', city: null }], 2));
+  assert.equal(overwrite.body.filled, 0);
+  const after = db.dump('universities').find((r) => r.code === '10003');
+  assert.equal(after.province, '北京', '非空省份不被覆盖');
+  assert.equal(after.city, '北京市');
+  // 基础信息通用：详情不因查询省份不同而改变。
+  const henan = await call(handle, ctx('/api/universities/10003?province=河南'));
+  const hebei = await call(handle, ctx('/api/universities/10003?province=河北'));
+  assert.equal(henan.body.university.province, '北京');
+  assert.equal(hebei.body.university.province, '北京');
+  assert.equal(hebei.body.university.website, 'https://www.join-tsinghua.edu.cn');
+});
+
 test('模块5：导入行服务端复核（省份/科类/分数/来源）', async () => {
   const { handle, cookie } = await adminFixture();
   await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW]));
@@ -888,6 +1128,41 @@ test('模块5：录取/计划导入与详情查询（计划按名称关联、同
 
   const noYear = await call(handle, ctx('/api/universities/10003?year=2024'));
   assert.equal(noYear.body.plans.length, 0, '无该年计划时返回空（前端显示暂无数据）');
+});
+
+test('模块5：按高考省份查询详情，省份条件先于截断，默认计划年份取该省实际数据', async () => {
+  const { handle, db } = fixture();
+  await db.from('universities').insertIfAbsent([UNIVERSITY_ROW, UNIVERSITY_ROW2], { onConflict: 'code' });
+  await db.from('data_meta').insertIfAbsent({ key: 'plan_facets', value: JSON.stringify({ provinces: ['河北', '河南'], years: [2025, 2026] }) }, { onConflict: 'key' });
+  await db.from('admission_scores').insertIfAbsent([
+    ...Array.from({ length: 500 }, (_, i) => ({ ...SCORE_ROW, id: `henan-${i}`, year: 2026 })),
+    { ...SCORE_ROW, id: 'hebei-score', province: '河北', year: 2025 },
+  ], { onConflict: 'id' });
+  await db.from('enrollment_plans').insertIfAbsent([
+    ...Array.from({ length: 1000 }, (_, i) => ({ ...PLAN_ROW, id: `henan-plan-${i}`, major_name: 'A', year: 2025 })),
+    { ...PLAN_ROW, id: 'henan-latest', year: 2026 },
+    { ...PLAN_ROW, id: 'hebei-plan', province: '河北', year: 2025, major_name: 'Z' },
+  ], { onConflict: 'id' });
+
+  const hebei = await call(handle, ctx('/api/universities/10003?province=河北'));
+  assert.equal(hebei.status, 200);
+  assert.deepEqual(hebei.body.scores.map((row) => row.id), ['hebei-score']);
+  assert.deepEqual(hebei.body.plans.map((row) => row.id), ['hebei-plan']);
+  assert.equal(hebei.body.plan_year, 2025);
+  const henan = await call(handle, ctx('/api/universities/10003?province=河南'));
+  assert.equal(henan.body.plan_year, 2026);
+  assert.ok(henan.body.scores.every((row) => row.province === '河南'));
+  assert.deepEqual(henan.body.plans.map((row) => row.id), ['henan-latest']);
+  const emptyYear = await call(handle, ctx('/api/universities/10003?province=河北&year=2026'));
+  assert.equal(emptyYear.body.plan_year, 2026);
+  assert.deepEqual(emptyYear.body.plans, []);
+  const emptySchool = await call(handle, ctx('/api/universities/10001?province=河北'));
+  assert.equal(emptySchool.status, 200);
+  assert.deepEqual(emptySchool.body.scores, []);
+  assert.deepEqual(emptySchool.body.plans, []);
+  assert.equal(emptySchool.body.plan_year, null);
+  assert.equal((await call(handle, ctx('/api/universities/10003?province=广东'))).status, 400);
+  assert.equal((await call(handle, ctx('/api/universities/10003?province='))).status, 400);
 });
 
 test('模块5：元数据需管理员且形状受校验', async () => {

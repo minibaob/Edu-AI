@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { BookOpen, Building2, Compass, GraduationCap, Home, LogOut, Upload, User } from "lucide-react";
+import { BookOpen, Building2, Compass, GraduationCap, Home, LogOut, NotebookPen, Upload, User } from "lucide-react";
 import { Link, navigate, useRoute } from "@/src/lib/router";
 import { useAuth } from "@/src/lib/auth";
 import { cn } from "@/lib/utils";
@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { to: "/resources", label: "学习资料库", icon: BookOpen },
   { to: "/universities", label: "高校查询", icon: Building2 },
   { to: "/assessment", label: "兴趣测评", icon: Compass },
+  { to: "/wrong-questions", label: "错题本", icon: NotebookPen },
 ];
 
 export function Layout({ children }: { children: ReactNode }) {

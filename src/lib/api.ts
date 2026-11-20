@@ -43,6 +43,12 @@ const ERROR_MESSAGES: Record<string, string> = {
   login_required: "请先登录",
   invalid_filter: "筛选条件不正确，请重新选择",
   invalid_resource: "资料信息不正确，请检查标题、分类与来源",
+  invalid_wrong_question: "错题信息不正确，请检查必填项、选项和字数限制",
+  publication_confirmation_required: "公开错题前，请阅读提示并再次确认",
+  wrong_question_unconfirmed: "本次写入结果未确认，可能已经保存。请先刷新核对，勿重复提交",
+  review_busy: "本次复习未记录：该错题正在处理其他复习请求，请稍后手动重试",
+  wrong_question_session_changed: "登录账号已变化，已停止显示错题数据。请刷新页面确认当前账号",
+  wrong_question_response_invalid: "错题数据响应不完整，请刷新后核对",
   file_upload_unavailable: "文件服务暂时不可用，请稍后重试，或先登记来源链接型资料",
   invalid_file: "文件不正确，请检查文件名与大小后重试",
   unsupported_file_type: "不支持该文件类型，可上传 PDF、Word、PPT、Excel、文本、图片或 ZIP",
@@ -114,10 +120,14 @@ export type UniversityDetail = {
 };
 
 export const getUniversities = () => api<UniversitiesResponse>("/api/universities");
-export const getUniversityDetail = (code: string, year?: number) =>
-  api<UniversityDetail>(`/api/universities/${code}${year ? `?year=${year}` : ""}`);
+export const getUniversityDetail = (code: string, year?: number, province?: string) => {
+  const params = new URLSearchParams();
+  if (year !== undefined) params.set("year", String(year));
+  if (province) params.set("province", province);
+  return api<UniversityDetail>(`/api/universities/${encodeURIComponent(code)}?${params}`);
+};
 export const postImportChunk = (body: {
   table: string; run_id: string; chunk_index: number; rows: unknown[];
-}) => api<{ ok: boolean; received: number; inserted: number }>("/api/admin/import", { method: "POST", body });
+}) => api<{ ok: boolean; received: number; inserted: number; filled?: number }>("/api/admin/import", { method: "POST", body });
 export const postMeta = (key: string, value: unknown) =>
   api<{ ok: boolean }>("/api/admin/meta", { method: "POST", body: { key, value } });

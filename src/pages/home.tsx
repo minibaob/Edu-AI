@@ -44,6 +44,7 @@ const QUICK_ENTRIES = [
   { to: "/universities", title: "高校查询", desc: "河北 / 河南录取数据", icon: Building2 },
   { to: "/assessment", title: "兴趣测评", desc: "探索专业与职业方向", icon: Compass },
   { to: "/profile", title: "个人中心", desc: "管理资料与学习设置", icon: User },
+  { to: "/wrong-questions", title: "我的错题本", desc: "整理错因，记录复习", icon: BookOpen },
 ];
 
 const TASK_SUBJECTS = ["语文", "数学", "英语", "物理", "化学", "生物", "历史", "地理", "政治", "其他"];
