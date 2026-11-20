@@ -371,10 +371,29 @@ function parseResourceQuery(request) {
 
 async function listResources(db, request) {
   const query = parseResourceQuery(request);
-  let mineUserId = null;
+  let session = null;
   if (query.mine) {
-    const session = await requireSession(db, request);
-    mineUserId = session.userId;
+    session = await requireSession(db, request);
+  } else {
+    try {
+      const result = await validateSession(db, request);
+      if (result.state === 'valid' && result.session) session = result.session;
+    } catch {
+      // 匿名或会话无效：列表照常返回，不标注收藏。
+    }
+  }
+  const mineUserId = query.mine ? session.userId : null;
+  const favoriteIds = new Set();
+  if (session) {
+    try {
+      const favs = rows(await db.from('favorites').select(FAVORITE_COLUMNS)
+        .eq('user_id', session.userId).limit(COUNT_LIMIT));
+      for (const fav of favs) {
+        if (!fav.revoked_at) favoriteIds.add(fav.resource_id);
+      }
+    } catch {
+      // 收藏表读取失败时按未收藏显示，与详情接口策略一致。
+    }
   }
   const all = rows(await db.from('resources').select(RESOURCE_COLUMNS).limit(500));
   const needle = query.q.toLowerCase();
@@ -390,7 +409,8 @@ async function listResources(db, request) {
   });
   filtered.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
   const total = filtered.length;
-  const items = filtered.slice(query.offset, query.offset + query.limit).map((row) => publicResource(row));
+  const items = filtered.slice(query.offset, query.offset + query.limit)
+    .map((row) => publicResource(row, favoriteIds.has(row.id)));
   return json({ total, items });
 }
 

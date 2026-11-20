@@ -470,6 +470,14 @@ test('收藏：增删、再收藏、A/B 隔离', async () => {
   assert.equal(fav.status, 200);
   assert.deepEqual(fav.body, { favorited: true });
 
+  // 列表接口标注当前会话的收藏状态（修复：列表曾始终显示未收藏）。
+  const listA = await call(handle, ctx('/api/resources', { cookie: cookieA }));
+  assert.equal(listA.body.items.find((item) => item.id === id)?.favorited, true, 'A 的列表应标注已收藏');
+  const listB = await call(handle, ctx('/api/resources', { cookie: cookieB }));
+  assert.equal(listB.body.items.find((item) => item.id === id)?.favorited, false, 'B 的列表不标注 A 的收藏');
+  const listAnon = await call(handle, ctx('/api/resources'));
+  assert.equal(listAnon.body.items.find((item) => item.id === id)?.favorited, false, '匿名列表不标注收藏');
+
   const favsA = await call(handle, ctx('/api/favorites', { cookie: cookieA }));
   assert.equal(favsA.body.total, 1);
   assert.equal(favsA.body.items[0].id, id);
