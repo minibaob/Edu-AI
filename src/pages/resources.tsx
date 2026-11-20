@@ -347,7 +347,7 @@ export default function ResourcesPage() {
         </div>
         {user && (
           <Button onClick={() => setShowUpload((v) => !v)}>
-            <Upload className="size-4" aria-hidden /> 登记资料
+            <Upload className="size-4" aria-hidden /> 上传资料
           </Button>
         )}
       </div>
@@ -355,7 +355,7 @@ export default function ResourcesPage() {
       {showUpload && user && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">登记资料</CardTitle>
+            <CardTitle className="text-lg">上传资料</CardTitle>
             <CardDescription>
               可登记来源链接型资料（官方页面、公开讲义等），或直接上传文件
               （PDF、Word、PPT、Excel、文本、图片、ZIP，单个不超过 10MB）。仅可分享你有权公开的内容。
@@ -490,7 +490,7 @@ export default function ResourcesPage() {
       <div className="flex gap-2">
         <Button variant={tab === "all" ? "default" : "outline"} onClick={() => { setTab("all"); setOffset(0); }}>全部资料</Button>
         <Button variant={tab === "favorites" ? "default" : "outline"} onClick={() => { setTab("favorites"); setOffset(0); }}>我的收藏</Button>
-        <Button variant={tab === "mine" ? "default" : "outline"} onClick={() => { setTab("mine"); setOffset(0); }}>我登记的</Button>
+        <Button variant={tab === "mine" ? "default" : "outline"} onClick={() => { setTab("mine"); setOffset(0); }}>我上传的</Button>
       </div>
 
       {tab !== "all" && !user ? (
