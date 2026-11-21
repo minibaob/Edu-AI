@@ -89,7 +89,7 @@ export function errorMessage(error: unknown): string {
 }
 
 // ===== 模块5：高校与录取数据 =====
-export type UniversityIndexItem = { code: string; name: string };
+export type UniversityIndexItem = { code: string; name: string; province: string | null };
 export type Facets = { provinces?: string[]; years?: number[]; categories?: string[]; batches?: string[] };
 export type Counts = { universities: number; admission_scores: number; enrollment_plans: number };
 export type UniversitiesResponse = {

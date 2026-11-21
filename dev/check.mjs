@@ -1313,6 +1313,70 @@ test('模块5：匿名查询空库返回空索引；未知院校代码 404', asy
   assert.equal(detail.body.error, 'not_found');
 });
 
+test('高校所在地：列表从真实院校行补充省份，不混淆生源省份，不信任旧索引所在地', async () => {
+  const { db, handle, control } = fixture();
+  await db.from('universities').insertIfAbsent([
+    { code: '10003', name: '清华大学', province: '北京' },
+    { code: '10001', name: '北京大学', province: null },
+    { code: 'blank', name: '本地测试', province: ' ' },
+  ], { onConflict: 'code' });
+  const index = [
+    { code: '10003', name: '清华大学', province: '河南' },
+    { code: '10001', name: '北京大学' },
+    { code: 'blank', name: '本地测试' },
+    { code: 'missing', name: '本地未登记测试', province: '河北' },
+  ];
+  await db.from('data_meta').insertIfAbsent([
+    { key: 'universities_index', value: JSON.stringify(index) },
+    { key: 'score_facets', value: JSON.stringify({ provinces: ['河北', '河南'] }) },
+  ], { onConflict: 'key' });
+  control.writes.length = 0;
+  const result = await call(handle, ctx('/api/universities', { origin: null }));
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.universities.map((u) => u.province), ['北京', null, null, null]);
+  assert.deepEqual(result.body.score_facets.provinces, ['河北', '河南']);
+  assert.deepEqual(result.body.universities.map((u) => u.code), index.map((u) => u.code));
+  assert.deepEqual(control.writes, []);
+  await db.from('universities').update({ province: '北京' }).eq('code', '10001');
+  const filled = await call(handle, ctx('/api/universities'));
+  assert.equal(filled.body.universities[1].province, '北京', '补空导入后不需另写索引即可读取');
+});
+
+test('高校所在地：超过1000所完整读取，适配器短页也不遗漏后续省份', async () => {
+  const { db } = fixture();
+  const records = Array.from({ length: 1007 }, (_, i) => ({ code: String(10000 + i), name: `本地测试学校${i}`, province: i === 1006 ? '新疆' : '河北' }));
+  await db.from('universities').insertIfAbsent(records, { onConflict: 'code' });
+  await db.from('data_meta').insertIfAbsent({ key: 'universities_index', value: JSON.stringify(records.map(({ code, name }) => ({ code, name }))) }, { onConflict: 'key' });
+  const readOnly = { from(table) { return { select(columns) {
+    const query = db.from(table).select(columns);
+    const range = query.range.bind(query);
+    query.range = (from, to) => range(from, Math.min(to, from + 99));
+    return query;
+  } }; } };
+  const result = await call(createApplication({ db: readOnly, origin: PUBLIC_ORIGIN }), ctx('/api/universities'));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.universities.length, 1007);
+  assert.equal(result.body.universities[1006].province, '新疆');
+  assert.ok(result.body.universities.slice(0, 1006).every((u) => u.province === '河北'));
+});
+
+test('高校所在地：读取失败或分页未前进时返回503，不把失败说成所在地缺失', async () => {
+  const { db } = fixture();
+  await db.from('data_meta').insertIfAbsent({ key: 'universities_index', value: JSON.stringify([{ code: 'test', name: '本地测试' }]) }, { onConflict: 'key' });
+  for (const failed of [true, false]) {
+    const broken = { from(table) {
+      if (table !== 'universities') return db.from(table);
+      const query = { select() { return query; }, order() { return query; }, range() {
+        return Promise.resolve(failed ? { data: null, error: { code: 'read_failed' } } : { data: [{ code: 'test', province: '河北' }], error: null });
+      } };
+      return query;
+    } };
+    const result = await call(createApplication({ db: broken, origin: PUBLIC_ORIGIN }), ctx('/api/universities'));
+    assert.equal(result.status, 503);
+    assert.equal(result.body.error, 'database_unavailable');
+  }
+});
+
 test('模块5：导入需管理员；匿名 401、学生 403、admin 200', async () => {
   const { handle, cookie } = await adminFixture();
   const anon = await postImport(handle, null, chunk('universities', [UNIVERSITY_ROW]));
@@ -1392,7 +1456,7 @@ test('模块5：录取/计划导入与详情查询（计划按名称关联、同
   await postMeta(handle, cookie, { key: 'counts', value: { universities: 1, admission_scores: 2, enrollment_plans: 2 } });
 
   const list = await call(handle, ctx('/api/universities'));
-  assert.deepEqual(list.body.universities, [{ code: '10003', name: '清华大学' }]);
+  assert.deepEqual(list.body.universities, [{ code: '10003', name: '清华大学', province: null }]);
   assert.equal(list.body.counts.admission_scores, 2);
 
   const detail = await call(handle, ctx('/api/universities/10003?year=2025'));

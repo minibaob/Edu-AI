@@ -98,14 +98,18 @@ export default function UniversitiesPage({ code }: { code?: string }) {
 
 function ListView({ data, province }: { data: UniversitiesResponse; province: string }) {
   const [query, setQuery] = useState("");
+  const [locationProvince, setLocationProvince] = useState("");
   const [page, setPage] = useState(0);
+  const locations = useMemo(() => distinct(data.universities.map((u) => u.province)
+    .filter((value): value is string => Boolean(value))).sort((a, b) => a.localeCompare(b, "zh-CN")), [data]);
+  const unknownCount = data.universities.filter((u) => !u.province).length;
 
   const filtered = useMemo(() => {
-    const list = data?.universities ?? [];
     const q = query.trim().toLowerCase();
-    if (!q) return list;
-    return list.filter((u) => u.name.toLowerCase().includes(q) || u.code.toLowerCase().includes(q));
-  }, [data, query]);
+    return data.universities.filter((u) =>
+      (!q || u.name.toLowerCase().includes(q) || u.code.toLowerCase().includes(q))
+      && (!locationProvince || (locationProvince === "unknown" ? !u.province : u.province === locationProvince)));
+  }, [data, query, locationProvince]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const current = Math.min(page, pageCount - 1);
@@ -133,16 +137,36 @@ function ListView({ data, province }: { data: UniversitiesResponse; province: st
         <>
           <p className="text-sm text-muted-foreground">院校名录共 {data.universities.length} 所 · 当前匹配 {filtered.length} 所</p>
 
-          <div className="relative max-w-md">
-            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
-            <Input
-              className="pl-9"
-              placeholder="搜索学校名称或院校代码"
-              value={query}
-              onChange={(e) => { setQuery(e.target.value); setPage(0); }}
-              aria-label="搜索院校"
-            />
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+            <div className="flex min-w-0 flex-col gap-2">
+              <Label htmlFor="university-search">学校名称 / 院校代码</Label>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+                <Input id="university-search"
+                  className="pl-9"
+                  placeholder="搜索学校名称或院校代码"
+                  value={query}
+                  onChange={(e) => { setQuery(e.target.value); setPage(0); }}
+                  aria-label="搜索院校"
+                />
+              </div>
+            </div>
+            <div className="flex min-w-0 flex-col gap-2">
+              <Label htmlFor="university-location">高校所在省份</Label>
+              <select id="university-location" className={`${selectClass} w-full bg-card`}
+                value={locationProvince} onChange={(e) => { setLocationProvince(e.target.value); setPage(0); }}>
+                <option value="">全部省份</option>
+                {locations.map((item) => <option key={item} value={item}>{item}</option>)}
+                {unknownCount > 0 && <option value="unknown">所在地暂无数据（{unknownCount} 所）</option>}
+              </select>
+            </div>
+            <Button variant="outline" onClick={() => { setQuery(""); setLocationProvince(""); setPage(0); }}
+              disabled={!query && !locationProvince}>重置筛选</Button>
           </div>
+          <p className="text-xs text-muted-foreground">
+            此处按高校所在地分类，不改变上方高考省份；录取数据仍面向{province}考生。
+            {unknownCount > 0 && `有 ${unknownCount} 所高校所在地暂无数据，不推测归属。`}
+          </p>
 
           <Card>
             <CardContent className="p-0">
@@ -151,9 +175,12 @@ function ListView({ data, province }: { data: UniversitiesResponse; province: st
                   <li key={u.code}>
                     <Link
                       to={`/universities/${encodeURIComponent(u.code)}?province=${encodeURIComponent(province)}`}
-                      className="flex items-center justify-between gap-3 px-4 py-3 hover:bg-accent"
+                      className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 hover:bg-accent"
                     >
-                      <span className="font-medium">{u.name}</span>
+                      <span className="flex min-w-0 flex-wrap items-center gap-2">
+                        <span className="break-words font-medium">{u.name}</span>
+                        <Badge variant="secondary">{u.province || "所在地暂无数据"}</Badge>
+                      </span>
                       <span className="shrink-0 text-xs text-muted-foreground">院校代码 {u.code}</span>
                     </Link>
                   </li>

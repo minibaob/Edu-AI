@@ -30,8 +30,23 @@ export async function listUniversities(db) {
     readMeta(db, 'plan_facets'),
     readMeta(db, 'counts'),
   ]);
+  const universities = Array.isArray(index) ? index : [];
+  const locations = new Map();
+  if (universities.length > 0) {
+    let offset = 0;
+    let lastCode;
+    for (;;) {
+      const page = rows(await db.from('universities').select('code,province').order('code').range(offset, offset + 499));
+      if (page.length === 0) break;
+      const nextCode = page[page.length - 1].code;
+      if (nextCode === lastCode) throw new AppError('database_unavailable', 503);
+      lastCode = nextCode;
+      for (const item of page) locations.set(item.code, item.province?.trim() || null);
+      offset += page.length;
+    }
+  }
   return json({
-    universities: Array.isArray(index) ? index : [],
+    universities: universities.map((item) => ({ code: item.code, name: item.name, province: locations.get(item.code) ?? null })),
     score_facets: scoreFacets ?? { provinces: [], years: [], categories: [], batches: [] },
     plan_facets: planFacets ?? { provinces: [], years: [], batches: [] },
     counts: counts ?? { universities: 0, admission_scores: 0, enrollment_plans: 0 },
