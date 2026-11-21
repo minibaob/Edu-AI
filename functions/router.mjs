@@ -80,7 +80,15 @@ async function countRows(db, table, filters = {}) {
 async function stats(db, request) {
   const session = await validateSession(db, request);
   const userId = session.state === 'valid' ? session.session.userId : null;
-  const resourcesTotal = await countRows(db, 'resources');
+  let resourcesTotal = null;
+  let resourcesCapped = false;
+  try {
+    const all = rows(await db.from('resources').select('id,deleted_at').limit(COUNT_LIMIT));
+    resourcesCapped = all.length === COUNT_LIMIT;
+    resourcesTotal = all.filter((row) => row.deleted_at == null).length;
+  } catch {
+    resourcesTotal = null;
+  }
   // 院校总量只来自导入时服务端维护的 counts 元数据（精确值）；未导入时为 null。
   let universitiesTotal = null;
   try {
@@ -112,7 +120,7 @@ async function stats(db, request) {
   return json({
     stats: {
       resources_total: resourcesTotal,
-      resources_capped: resourcesTotal === COUNT_LIMIT,
+      resources_capped: resourcesCapped,
       universities_total: universitiesTotal,
       favorites_count: favoritesCount,
       favorites_capped: favoritesCapped,
@@ -329,7 +337,7 @@ async function listMajors(db, request) {
 // 读接口公开；写接口（登记、收藏、文件上传）必须登录，归属一律来自会话，绝不信任浏览器提交的 owner_id。
 // 文件型资料走平台 Storage 签名直传：签发上传 URL → 浏览器 PUT → 登记时服务端回读实际字节，
 // 用 storage-validation 复核大小与 MIME 后才落库；下载同样由服务端按数据库行签发短时 URL。
-const RESOURCE_COLUMNS = 'id,owner_id,title,grade,subject,type,source_url,source_name,description,file_name,file_size,mime,storage_key,copyright_confirmed,created_at';
+const RESOURCE_COLUMNS = 'id,owner_id,title,grade,subject,type,source_url,source_name,description,file_name,file_size,mime,storage_key,copyright_confirmed,created_at,deleted_at';
 const FAVORITE_COLUMNS = 'user_id,resource_id,created_at,revoked_at';
 
 function publicResource(row, favorited = false) {
@@ -400,6 +408,7 @@ async function listResources(db, request) {
   const all = rows(await db.from('resources').select(RESOURCE_COLUMNS).limit(500));
   const needle = query.q.toLowerCase();
   const filtered = all.filter((row) => {
+    if (row.deleted_at != null) return false;
     if (mineUserId !== null && row.owner_id !== mineUserId) return false;
     if (query.grade && row.grade !== query.grade) return false;
     if (query.subject && row.subject !== query.subject) return false;
@@ -419,7 +428,7 @@ async function listResources(db, request) {
 async function getResource(db, request, id) {
   if (!isUuid(id)) throw new AppError('not_found', 404);
   const found = rows(await db.from('resources').select(RESOURCE_COLUMNS).eq('id', id).limit(1));
-  if (found.length !== 1) throw new AppError('not_found', 404);
+  if (found.length !== 1 || found[0].deleted_at != null) throw new AppError('not_found', 404);
   let favorited = false;
   try {
     const result = await validateSession(db, request);
@@ -446,6 +455,7 @@ async function createResource(db, body, session) {
     mime: null,
     storage_key: null,
     copyright_confirmed: true,
+    deleted_at: null,
     created_at: new Date().toISOString(),
   }, { onConflict: 'id' }).select(RESOURCE_COLUMNS));
   if (created.length !== 1) return errorJson('resource_unconfirmed', 503);
@@ -503,6 +513,7 @@ async function createFileResource(db, storage, body, session) {
     mime: actual.contentType,
     storage_key: body.storage_key,
     copyright_confirmed: true,
+    deleted_at: null,
     created_at: new Date().toISOString(),
   }, { onConflict: 'id' }).select(RESOURCE_COLUMNS));
   if (created.length !== 1) return errorJson('resource_unconfirmed', 503);
@@ -515,7 +526,7 @@ async function resourceFileUrl(db, storage, session, id) {
   if (!isUuid(id)) throw new AppError('not_found', 404);
   if (!storage) throw new AppError('file_upload_unavailable', 503);
   const found = rows(await db.from('resources').select(RESOURCE_COLUMNS).eq('id', id).limit(1));
-  if (found.length !== 1 || found[0].storage_key == null) throw new AppError('file_not_found', 404);
+  if (found.length !== 1 || found[0].storage_key == null || found[0].deleted_at != null) throw new AppError('file_not_found', 404);
   let signed;
   try {
     signed = await storage.createSignedUrl(found[0].storage_key, 300);
@@ -530,10 +541,31 @@ async function resourceFileUrl(db, storage, session, id) {
   });
 }
 
+// 内容管理：上传者删除自己的资料，管理员可下架任意资料。软删除保留审计记录，
+// 列表/详情/下载/收藏全链路过滤已删除行；存储对象尽力清理，失败不阻断下架
+// （下载入口已按 deleted_at 拦截，对象不再可达）。
+async function deleteResource(db, storage, session, id) {
+  if (!isUuid(id)) throw new AppError('not_found', 404);
+  const found = rows(await db.from('resources').select(RESOURCE_COLUMNS).eq('id', id).limit(1));
+  if (found.length !== 1 || found[0].deleted_at != null) throw new AppError('not_found', 404);
+  const row = found[0];
+  if (row.owner_id !== session.userId) {
+    const user = await loadUser(db, session.userId);
+    if (user.role !== 'admin') throw new AppError('resource_forbidden', 403);
+  }
+  const updated = rows(await db.from('resources').update({ deleted_at: new Date().toISOString() })
+    .eq('id', id).select('id'));
+  if (updated.length !== 1) return errorJson('resource_unconfirmed', 503);
+  if (row.storage_key != null && storage) {
+    try { await storage.remove([row.storage_key]); } catch { /* 清理尽力而为 */ }
+  }
+  return json({ deleted: true });
+}
+
 async function favoriteResource(db, request, session, id) {
   if (!isUuid(id)) throw new AppError('not_found', 404);
-  const found = rows(await db.from('resources').select('id').eq('id', id).limit(1));
-  if (found.length !== 1) throw new AppError('not_found', 404);
+  const found = rows(await db.from('resources').select('id,deleted_at').eq('id', id).limit(1));
+  if (found.length !== 1 || found[0].deleted_at != null) throw new AppError('not_found', 404);
   const inserted = rows(await db.from('favorites').insertIfAbsent({
     user_id: session.userId, resource_id: id, created_at: new Date().toISOString(), revoked_at: null,
   }, { onConflict: 'user_id,resource_id' }).select(FAVORITE_COLUMNS));
@@ -556,7 +588,7 @@ async function listFavorites(db, request, session) {
   const favs = rows(await db.from('favorites').select(FAVORITE_COLUMNS).eq('user_id', session.userId).limit(500));
   const active = favs.filter((f) => !f.revoked_at);
   const all = rows(await db.from('resources').select(RESOURCE_COLUMNS).limit(500));
-  const byId = new Map(all.map((row) => [row.id, row]));
+  const byId = new Map(all.filter((row) => row.deleted_at == null).map((row) => [row.id, row]));
   const items = active
     .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
     .map((f) => byId.get(f.resource_id))
@@ -725,6 +757,10 @@ async function route(db, request, origin, storage) {
   }
   const resourceDetail = path.match(/^\/api\/resources\/([0-9a-f-]{36})$/);
   if (resourceDetail && request.method === 'GET') return getResource(db, request, resourceDetail[1]);
+  if (resourceDetail && request.method === 'DELETE') {
+    const session = await requireSession(db, request);
+    return deleteResource(db, storage, session, resourceDetail[1]);
+  }
 
   if (path === '/api/assessments' && request.method === 'GET') {
     const session = await requireSession(db, request);

@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { Upload } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Trash2, Upload } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,6 +7,8 @@ import { Label } from "@/components/ui/label";
 import { Link } from "@/src/lib/router";
 import { useAuth } from "@/src/lib/auth";
 import { errorMessage, postImportChunk, postMeta } from "@/src/lib/api";
+import { deleteResource, listResources } from "@/src/lib/resources";
+import type { Resource } from "@/src/lib/resources";
 import { parseCsv, sha256Hex, toRecords } from "@/src/lib/csv";
 import type { ImportRecord, ImportTable } from "@/src/lib/csv";
 
@@ -175,6 +177,93 @@ export default function AdminImportPage() {
       <p className="text-xs text-muted-foreground">
         导入完成后，院校索引与筛选选项会自动更新，前台「高校查询」即可检索。数据真实性以官方来源为准。
       </p>
+
+      <ResourceModeration />
     </div>
+  );
+}
+
+// 阶段5 内容管理：管理员下架任意资料（软删除，存储文件同步清理）。
+function ResourceModeration() {
+  const [items, setItems] = useState<Resource[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [armedId, setArmedId] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    (async () => {
+      // 接口单页上限 100；服务端最多返回最近 500 份，逐页取全。
+      const first = await listResources({ limit: 100, offset: 0 });
+      let items = first.items;
+      for (let offset = 100; offset < Math.min(first.total, 500); offset += 100) {
+        const page = await listResources({ limit: 100, offset });
+        items = items.concat(page.items);
+      }
+      if (!cancelled) { setItems(items); setTotal(first.total); }
+    })().catch((err) => { if (!cancelled) setError(errorMessage(err)); });
+    return () => { cancelled = true; };
+  }, [version]);
+
+  async function takedown(id: string) {
+    setBusyId(id);
+    try {
+      await deleteResource(id);
+      setArmedId(null);
+      setVersion((v) => v + 1);
+    } catch (err) {
+      setError(errorMessage(err));
+      setArmedId(null);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">资料管理</CardTitle>
+        <CardDescription>
+          对用户上传内容进行必要管理：下架违规或版权不明的资料。下架后前台不再展示、不可下载，上传的文件会被清理（软删除保留记录）。
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
+        {items === null && !error && <p className="text-sm text-muted-foreground">正在加载资料列表…</p>}
+        {items !== null && items.length === 0 && <p className="text-sm text-muted-foreground">当前没有已登记的资料。</p>}
+        {items !== null && items.length > 0 && (
+          <>
+            <p className="text-sm text-muted-foreground">共 {total} 份资料{total > 500 ? "（仅显示最近 500 份）" : ""}</p>
+            <ul className="flex flex-col divide-y rounded-xl border">
+              {items.map((item) => (
+                <li key={item.id} className="flex flex-wrap items-center gap-2 p-3 text-sm">
+                  <div className="min-w-0 flex-1">
+                    <Link to={`/resources?id=${item.id}`} className="font-medium text-primary hover:underline">{item.title}</Link>
+                    <p className="text-xs text-muted-foreground">
+                      {item.grade ?? "年级未标"} · {item.subject ?? "学科未标"} · {item.type}
+                      {" · 来源："}{item.source_name}
+                      {item.has_file ? " · 含上传文件" : ""}
+                      {" · "}{new Date(item.created_at).toLocaleDateString("zh-CN")}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant={armedId === item.id ? "destructive" : "outline"}
+                    disabled={busyId !== null}
+                    onClick={() => (armedId === item.id ? void takedown(item.id) : setArmedId(item.id))}
+                  >
+                    <Trash2 className="size-4" aria-hidden />
+                    {busyId === item.id ? "下架中…" : armedId === item.id ? "确认下架？" : "下架"}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }

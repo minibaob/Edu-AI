@@ -1640,3 +1640,66 @@ test('首页推荐：登录按年级/选科匹配真实资料，高校推荐来�
   assert.ok(anon.body.items.every((item) => item.kind === 'resource'));
   assert.equal(anon.body.items[0].title, '不相关最新资料');
 });
+
+// ---- 阶段5：内容管理（上传者删除 / 管理员下架，软删除全链路过滤） ----
+test('阶段5内容管理：上传者删除自己的资料，删除后全链路不可见，文件被清理', async () => {
+  const storage = createFakeStorage();
+  const { handle, db } = fixture(storage);
+  const cookieA = cookiePair(await register(handle, uniqueName()));
+  const cookieB = cookiePair(await register(handle, uniqueName()));
+
+  const intent = await uploadUrl(handle, cookieA, { file_name: '讲义.pdf', file_size: 100 });
+  const key = intent.body.storageKey;
+  storage.put(key, bytesOf(100), 'application/pdf');
+  const fileRes = (await finalizeFile(handle, cookieA, { ...FILE_BODY, storage_key: key, file_name: '讲义.pdf', file_size: 100 })).body.resource;
+  const linkRes = (await call(handle, ctx('/api/resources', { method: 'POST', cookie: cookieA, body: { ...FILE_BODY, source_url: 'https://example.edu.cn/x' } }))).body.resource;
+  assert.equal((await call(handle, ctx(`/api/resources/${fileRes.id}/favorite`, { method: 'POST', cookie: cookieB }))).status, 200);
+
+  // 未登录 401；他人学生 403；归属只认会话。
+  assert.equal((await call(handle, ctx(`/api/resources/${fileRes.id}`, { method: 'DELETE' }))).status, 401);
+  const forbidden = await call(handle, ctx(`/api/resources/${fileRes.id}`, { method: 'DELETE', cookie: cookieB }));
+  assert.equal(forbidden.status, 403);
+  assert.equal(forbidden.body.error, 'resource_forbidden');
+
+  const deleted = await call(handle, ctx(`/api/resources/${fileRes.id}`, { method: 'DELETE', cookie: cookieA }));
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(deleted.body, { deleted: true });
+  assert.equal(storage.has(key), false, '删除应清理存储对象');
+
+  // 详情/列表/下载/收藏全链路不可见。
+  assert.equal((await call(handle, ctx(`/api/resources/${fileRes.id}`))).status, 404);
+  const list = await call(handle, ctx('/api/resources'));
+  assert.equal(list.body.total, 1);
+  assert.equal(list.body.items[0].id, linkRes.id);
+  assert.equal((await call(handle, ctx(`/api/resources/${fileRes.id}/file`, { cookie: cookieB }))).body.error, 'file_not_found');
+  assert.equal((await call(handle, ctx(`/api/resources/${fileRes.id}/favorite`, { method: 'POST', cookie: cookieB }))).status, 404);
+  assert.equal((await call(handle, ctx('/api/favorites', { cookie: cookieB }))).body.total, 0);
+  assert.equal((await call(handle, ctx('/api/stats'))).body.stats.resources_total, 1);
+
+  // 重复删除 404；软删除保留行与审计标记。
+  assert.equal((await call(handle, ctx(`/api/resources/${fileRes.id}`, { method: 'DELETE', cookie: cookieA }))).status, 404);
+  const dump = db.dump('resources');
+  assert.equal(dump.length, 2, '软删除不物理删除');
+  assert.ok(dump.find((r) => r.id === fileRes.id).deleted_at, '应记录删除时间');
+
+  // 链接型资料同样可删，不涉及存储。
+  assert.equal((await call(handle, ctx(`/api/resources/${linkRes.id}`, { method: 'DELETE', cookie: cookieA }))).status, 200);
+  assert.equal((await call(handle, ctx('/api/resources'))).body.total, 0);
+  assert.equal((await call(handle, ctx('/api/stats'))).body.stats.resources_total, 0);
+});
+
+test('阶段5内容管理：管理员可下架任意资料；CSRF 覆盖 DELETE；错误方法 405', async () => {
+  const { handle, cookie: adminCookie } = await adminFixture();
+  const studentCookie = cookiePair(await register(handle, uniqueName()));
+  const res = (await call(handle, ctx('/api/resources', { method: 'POST', cookie: studentCookie, body: { ...FILE_BODY, source_url: 'https://example.edu.cn/y' } }))).body.resource;
+
+  const evil = await call(handle, ctx(`/api/resources/${res.id}`, { method: 'DELETE', cookie: adminCookie, origin: 'https://evil.test' }));
+  assert.equal(evil.status, 403);
+  assert.equal(evil.body.error, 'origin_forbidden');
+
+  const taken = await call(handle, ctx(`/api/resources/${res.id}`, { method: 'DELETE', cookie: adminCookie }));
+  assert.equal(taken.status, 200);
+  assert.equal((await call(handle, ctx('/api/resources'))).body.total, 0);
+  assert.equal((await call(handle, ctx(`/api/resources/${res.id}`))).status, 404);
+  assert.equal((await call(handle, ctx(`/api/resources/${res.id}`, { method: 'PUT', cookie: adminCookie }))).status, 405);
+});

@@ -91,19 +91,35 @@ export async function requestUploadUrl(input: { file_name: string; file_size: nu
 }
 
 // 浏览器把文件 PUT 到签名 URL（同源），Content-Type 用服务端签发时给定的值。
-export async function putFileToSignedUrl(uploadUrl: string, file: File, contentType: string): Promise<void> {
-  let response: Response;
-  try {
-    response = await fetch(uploadUrl, {
-      method: "PUT",
-      credentials: "same-origin",
-      headers: { "Content-Type": contentType },
-      body: file,
-    });
-  } catch {
-    throw new Error("network");
-  }
-  if (!response.ok) throw new Error("upload_failed");
+// 用 XHR 以获得真实上传进度（fetch 无法读取请求体发送进度）。
+export function putFileToSignedUrl(
+  uploadUrl: string,
+  file: File,
+  contentType: string,
+  onProgress?: (percent: number) => void
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", uploadUrl);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("Content-Type", contentType);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) {
+        onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error("upload_failed"));
+    };
+    xhr.onerror = () => reject(new Error("network"));
+    xhr.onabort = () => reject(new Error("upload_failed"));
+    xhr.send(file);
+  });
+}
+
+export async function deleteResource(id: string): Promise<{ deleted: boolean }> {
+  return api<{ deleted: boolean }>(`/api/resources/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export async function getFileDownloadUrl(id: string): Promise<{ downloadUrl: string; file_name: string; file_size: number; mime: string }> {

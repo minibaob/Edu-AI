@@ -1,16 +1,18 @@
-// 模块4 学习资料库：浏览（搜索 + 年级/学科/类型筛选 + 分页）、详情、收藏、
+// 模块4 学习资料库：浏览（搜索 + 年级/学科/类型筛选 + 分页）、详情（内容在线预览）、收藏、
 // 登记来源链接型资料与文件直传（平台 Storage 签名上传，服务端回读校验后才登记）。
 // 没有资料时展示空状态，不填充虚构资料。版权承诺为必填项。
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import {
   ArrowLeft,
   BookOpen,
   Download,
   ExternalLink,
+  Eye,
   Heart,
   LogIn,
   Search,
+  Trash2,
   Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -21,12 +23,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Progress } from "@/components/ui/progress";
 import { Link, navigate, useRoute } from "@/src/lib/router";
 import { useAuth } from "@/src/lib/auth";
 import { errorMessage } from "@/src/lib/api";
 import { GRADES, SUBJECTS } from "@/src/lib/options";
 import {
   createResource,
+  deleteResource,
   favoriteResource,
   getFileDownloadUrl,
   getResource,
@@ -37,7 +41,11 @@ import {
   unfavoriteResource,
 } from "@/src/lib/resources";
 import type { Resource } from "@/src/lib/resources";
+import { siteFilePath } from "@/src/lib/resource-preview";
 import { cn } from "@/lib/utils";
+
+// 预览器含 markdown/公式渲染库，按需懒加载，不拖慢列表首屏。
+const ResourceViewer = lazy(() => import("@/src/components/resource-viewer"));
 
 const selectClass =
   "h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50";
@@ -99,6 +107,9 @@ export default function ResourcesPage() {
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadStage, setUploadStage] = useState<{ stage: "sign" | "upload" | "verify"; percent: number } | null>(null);
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [form, setForm] = useState({
     title: "",
     grade: "",
@@ -148,6 +159,7 @@ export default function ResourcesPage() {
     setDetail(null);
     setDetailError(null);
     setDetailLoading(true);
+    setDeleteArmed(false);
     (async () => {
       try {
         const data = await getResource(selectedId);
@@ -222,9 +234,14 @@ export default function ResourcesPage() {
         copyright_confirmed: form.copyright_confirmed,
       };
       if (uploadMode === "file" && file) {
-        // 签发 → 浏览器 PUT 到签名 URL → 服务端回读校验通过后才登记。
+        // 签发 → 浏览器 PUT 到签名 URL（带真实进度）→ 服务端回读校验通过后才登记。
+        setUploadStage({ stage: "sign", percent: 0 });
         const intent = await requestUploadUrl({ file_name: file.name, file_size: file.size });
-        await putFileToSignedUrl(intent.uploadUrl, file, intent.contentType);
+        setUploadStage({ stage: "upload", percent: 0 });
+        await putFileToSignedUrl(intent.uploadUrl, file, intent.contentType, (percent) => {
+          setUploadStage({ stage: "upload", percent });
+        });
+        setUploadStage({ stage: "verify", percent: 100 });
         await createResource({
           ...base,
           storage_key: intent.storageKey,
@@ -249,6 +266,22 @@ export default function ResourcesPage() {
       setUploadMsg({ ok: false, text: errorMessage(err) });
     } finally {
       setUploadBusy(false);
+      setUploadStage(null);
+    }
+  }
+
+  async function handleDelete(resource: Resource) {
+    setDeleteBusy(true);
+    try {
+      await deleteResource(resource.id);
+      setDeleteArmed(false);
+      setListVersion((v) => v + 1);
+      navigate("/resources");
+    } catch (err) {
+      setDetailError(errorMessage(err));
+      setDeleteArmed(false);
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -280,6 +313,9 @@ export default function ResourcesPage() {
                 <Badge variant="outline">{detail.type}</Badge>
               </div>
               {detail.description && <p className="leading-relaxed">{detail.description}</p>}
+              <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+                <ResourceViewer resource={detail} loggedIn={!!user} />
+              </Suspense>
               <p className="text-muted-foreground">
                 来源：{detail.source_name}
                 {detail.source_url && (
@@ -291,7 +327,7 @@ export default function ResourcesPage() {
                       target="_blank"
                       rel="noreferrer"
                     >
-                      打开来源 <ExternalLink className="size-3.5" aria-hidden />
+                      {siteFilePath(detail.source_url) ? "原始文件" : "打开来源"} <ExternalLink className="size-3.5" aria-hidden />
                     </a>
                   </>
                 )}
@@ -314,7 +350,7 @@ export default function ResourcesPage() {
                   )}
                 </div>
               )}
-              <div className="flex gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Button
                   variant={detail.favorited ? "default" : "outline"}
                   disabled={!user || favBusy}
@@ -324,6 +360,19 @@ export default function ResourcesPage() {
                   {detail.favorited ? "已收藏" : "收藏"}
                 </Button>
                 {!user && <span className="self-center text-xs text-muted-foreground">登录后可收藏</span>}
+                {user && (detail.owner_id === user.id || user.role === "admin") && (
+                  <Button
+                    variant={deleteArmed ? "destructive" : "outline"}
+                    disabled={deleteBusy}
+                    onClick={() => (deleteArmed ? void handleDelete(detail) : setDeleteArmed(true))}
+                  >
+                    <Trash2 className="size-4" aria-hidden />
+                    {deleteBusy ? "删除中…" : deleteArmed ? "确认删除？" : detail.owner_id === user.id ? "删除我的资料" : "管理员下架"}
+                  </Button>
+                )}
+                {deleteArmed && (
+                  <span className="text-xs text-muted-foreground">删除后该资料不再展示和下载，上传的文件会被清理。</span>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -479,6 +528,16 @@ export default function ResourcesPage() {
                   <AlertDescription>{uploadMsg.text}</AlertDescription>
                 </Alert>
               )}
+              {uploadBusy && uploadStage && (
+                <div className="flex flex-col gap-1.5" role="status" aria-live="polite">
+                  <p className="text-sm text-muted-foreground">
+                    {uploadStage.stage === "sign" && "正在签发上传凭证…"}
+                    {uploadStage.stage === "upload" && `文件上传中 ${uploadStage.percent}%`}
+                    {uploadStage.stage === "verify" && "上传完成，服务端正在校验文件并登记…"}
+                  </p>
+                  <Progress value={uploadStage.stage === "sign" ? 0 : uploadStage.percent} aria-label="文件上传进度" />
+                </div>
+              )}
               <Button type="submit" disabled={uploadBusy} className="w-fit">
                 {uploadBusy ? (uploadMode === "file" ? "上传中…" : "登记中…") : "提交登记"}
               </Button>
@@ -609,12 +668,23 @@ export default function ResourcesPage() {
                           来源：{item.source_name}
                         </span>
                         <span className="flex shrink-0 items-center gap-2">
-                          {item.has_file && (
-                            <Badge variant="secondary" className="gap-1">
-                              <Download className="size-3" aria-hidden />附件
-                            </Badge>
-                          )}
-                          {item.source_url && (
+                          {item.has_file ? (
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                              onClick={() => navigate(`/resources?id=${encodeURIComponent(item.id)}`)}
+                            >
+                              <Eye className="size-3" aria-hidden /> 在线预览
+                            </button>
+                          ) : siteFilePath(item.source_url) ? (
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                              onClick={() => navigate(`/resources?id=${encodeURIComponent(item.id)}`)}
+                            >
+                              <BookOpen className="size-3" aria-hidden /> 在线阅读
+                            </button>
+                          ) : item.source_url ? (
                             <a
                               className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
                               href={item.source_url}
@@ -623,7 +693,7 @@ export default function ResourcesPage() {
                             >
                               打开来源 <ExternalLink className="size-3" aria-hidden />
                             </a>
-                          )}
+                          ) : null}
                         </span>
                       </div>
                     </CardContent>
