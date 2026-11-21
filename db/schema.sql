@@ -129,6 +129,7 @@ CREATE TABLE app.data_meta (
 -- 文件直传待 Storage 适配器在 Function 内接通后开启（仓库内暂无 Storage 客户端，
 -- 见改进建议）；在此之前只接受来源链接型登记，file_* 字段保持 NULL。
 -- 收藏用 revoked_at 软删除（取消收藏即标记撤销），不物理删除。
+-- 内容管理：deleted_at 软删除（上传者删除 / 管理员下架），全链路过滤已删除行。
 
 CREATE TABLE app.resources (
   id uuid PRIMARY KEY,
@@ -145,7 +146,8 @@ CREATE TABLE app.resources (
   mime text,
   storage_key text,
   copyright_confirmed boolean NOT NULL DEFAULT false,
-  created_at timestamptz NOT NULL
+  created_at timestamptz NOT NULL,
+  deleted_at timestamptz
 );
 
 CREATE TABLE app.favorites (
