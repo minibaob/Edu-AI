@@ -6,6 +6,7 @@ import ResourcesPage from "@/src/pages/resources";
 import UniversitiesPage from "@/src/pages/universities";
 import AssessmentPage from "@/src/pages/assessment";
 import ProfilePage from "@/src/pages/profile";
+import WrongQuestionsPage from "@/src/pages/wrong-questions";
 import LoginPage from "@/src/pages/login";
 import AdminImportPage from "@/src/pages/admin-import";
 
@@ -29,6 +30,9 @@ export default function App() {
         break;
       case "/profile":
         page = <ProfilePage />;
+        break;
+      case "/wrong-questions":
+        page = <WrongQuestionsPage />;
         break;
       case "/login":
         page = <LoginPage />;

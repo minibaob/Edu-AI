@@ -38,24 +38,35 @@ export async function listUniversities(db) {
   });
 }
 
-export async function universityDetail(db, code, planYear) {
+export async function universityDetail(db, code, planYear, province) {
   const found = rows(await db.from('universities').select('*').eq('code', code).limit(1));
   if (found.length !== 1) throw new AppError('not_found', 404);
   const university = found[0];
 
-  const scores = rows(await db.from('admission_scores').select(SCORE_COLUMNS)
-    .eq('university_code', code).order('year', { ascending: false }).limit(500));
+  let scoreQuery = db.from('admission_scores').select(SCORE_COLUMNS).eq('university_code', code);
+  if (province) scoreQuery = scoreQuery.eq('province', province);
+  const scores = rows(await scoreQuery.order('year', { ascending: false }).limit(500));
 
   const planFacets = await readMeta(db, 'plan_facets');
   const planYears = Array.isArray(planFacets?.years) ? planFacets.years : [];
   let year = planYear;
-  if (year === null || year === undefined) year = planYears.length > 0 ? Math.max(...planYears) : null;
+  if (year === null || year === undefined) {
+    if (province) {
+      const latest = rows(await db.from('enrollment_plans').select('year')
+        .eq('school_name', university.name).eq('province', province)
+        .order('year', { ascending: false }).limit(1));
+      year = latest[0]?.year ?? null;
+    } else {
+      year = planYears.length > 0 ? Math.max(...planYears) : null;
+    }
+  }
 
   let plans = [];
   if (year !== null) {
-    plans = rows(await db.from('enrollment_plans').select(PLAN_COLUMNS)
-      .eq('school_name', university.name).eq('year', year)
-      .order('major_name', { ascending: true }).limit(1000));
+    let planQuery = db.from('enrollment_plans').select(PLAN_COLUMNS)
+      .eq('school_name', university.name).eq('year', year);
+    if (province) planQuery = planQuery.eq('province', province);
+    plans = rows(await planQuery.order('major_name', { ascending: true }).limit(1000));
   }
   return json({ university, scores, plans, plan_year: year, plan_years: planYears });
 }
@@ -94,8 +105,26 @@ export async function importChunk(db, request) {
 
   const cleaned = rawRows.map(validator);
   let inserted;
+  let filled = 0;
   if (table === 'universities') {
-    inserted = await insertRecords(db, table, cleaned, 'code');
+    // 重导入补全基础信息：新代码插入；已有代码只补空列，绝不覆盖已有非空值。
+    inserted = 0;
+    for (const record of cleaned) {
+      const created = rows(await db.from('universities').insertIfAbsent(record, { onConflict: 'code' }).select('code'));
+      if (created.length === 1) { inserted += 1; continue; }
+      const existing = rows(await db.from('universities').select('code,province,city,type,level,tags,website').eq('code', record.code).limit(1));
+      if (existing.length !== 1) throw new AppError('database_unavailable', 503);
+      const patch = {};
+      for (const key of ['province', 'city', 'type', 'level', 'tags', 'website']) {
+        const current = existing[0][key];
+        if ((current === null || current === undefined || current === '') && record[key] !== null) patch[key] = record[key];
+      }
+      if (Object.keys(patch).length > 0) {
+        const updated = rows(await db.from('universities').update(patch).eq('code', record.code).select('code'));
+        if (updated.length !== 1) throw new AppError('database_unavailable', 503);
+        filled += 1;
+      }
+    }
   } else {
     const records = [];
     for (let i = 0; i < cleaned.length; i += 1) {
@@ -110,7 +139,7 @@ export async function importChunk(db, request) {
     counts[table] = (counts[table] ?? 0) + inserted;
     if (!(await writeMeta(db, 'counts', counts))) return errorJson('meta_unconfirmed', 503);
   }
-  return json({ ok: true, table, chunk_index: chunkIndex, received: cleaned.length, inserted });
+  return json({ ok: true, table, chunk_index: chunkIndex, received: cleaned.length, inserted, filled });
 }
 
 const META_KEYS = ['universities_index', 'score_facets', 'plan_facets', 'counts'];

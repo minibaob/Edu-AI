@@ -28,20 +28,28 @@ export function createFakeDb(control = { mode: 'ok', dropTable: null, rejectTabl
   function builder(table, mode, values) {
     const filters = [];
     let columns = '*';
-    let orderBy = null, orderAscending = true, maxRows = Infinity, execution;
+    const orders = [];
+    let maxRows = Infinity, startRow = 0, countExact = false, execution;
     const run = () => {
       const list = rows(table);
       const match = (row) => filters.every(([key, value]) => row[key] === value);
 
       if (mode === 'read') {
         const selected = list.filter(match);
-        if (orderBy) {
+        if (orders.length) {
           selected.sort((a, b) => {
-            const cmp = String(a[orderBy]).localeCompare(String(b[orderBy]));
-            return orderAscending ? cmp : -cmp;
+            for (const { name, ascending } of orders) {
+              const cmp = typeof a[name] === 'number' && typeof b[name] === 'number'
+                ? a[name] - b[name] : String(a[name]).localeCompare(String(b[name]));
+              if (cmp) return ascending ? cmp : -cmp;
+            }
+            return 0;
           });
         }
-        return { data: selected.slice(0, maxRows).map((row) => pick(row, columns)), error: null };
+        return {
+          data: selected.slice(startRow, startRow + maxRows).map((row) => pick(row, columns)), error: null,
+          ...(countExact ? { count: selected.length } : {}),
+        };
       }
 
       control.writes.push(table);
@@ -74,7 +82,13 @@ export function createFakeDb(control = { mode: 'ok', dropTable: null, rejectTabl
       const writeMode = takeMode(table);
       if (writeMode === 'reject') return { data: null, error: { code: 'write_failed', status: 409 } };
       const matched = list.filter(match);
-      for (const row of matched) Object.assign(row, values.row);
+      if (mode === 'delete') {
+        for (let i = list.length - 1; i >= 0; i -= 1) {
+          if (match(list[i])) list.splice(i, 1);
+        }
+      } else {
+        for (const row of matched) Object.assign(row, values.row);
+      }
       if (writeMode === 'drop') throw new Error('simulated response loss');
       return { data: matched.map((row) => pick(row, columns)), error: null };
     };
@@ -82,8 +96,13 @@ export function createFakeDb(control = { mode: 'ok', dropTable: null, rejectTabl
     const chain = {
       eq(key, value) { filters.push([key, value]); return chain; },
       limit(count) { maxRows = count; return chain; },
-      order(name, options) { orderBy = String(name); orderAscending = options?.ascending !== false; return chain; },
-      select(names) { if (typeof names === 'string') columns = names; return chain; },
+      order(name, options) { orders.push({ name: String(name), ascending: options?.ascending !== false }); return chain; },
+      range(from, to) { startRow = from; maxRows = to - from + 1; return chain; },
+      select(names, options) {
+        if (typeof names === 'string') columns = names;
+        if (options?.count === 'exact') countExact = true;
+        return chain;
+      },
       then(resolve, reject) { execution ??= Promise.resolve().then(run); return execution.then(resolve, reject); },
     };
     return chain;
@@ -92,9 +111,10 @@ export function createFakeDb(control = { mode: 'ok', dropTable: null, rejectTabl
   return {
     from(table) {
       return {
-        select: (columns) => builder(table, 'read', null).select(columns),
+        select: (columns, options) => builder(table, 'read', null).select(columns, options),
         insertIfAbsent: (row, options) => builder(table, 'insert', { row, onConflict: options?.onConflict }),
         update: (row) => builder(table, 'update', { row }),
+        delete: () => builder(table, 'delete', null),
       };
     },
     // 仅测试使用：读取原始行，用于断言存储内容（例如不含明文口令）。

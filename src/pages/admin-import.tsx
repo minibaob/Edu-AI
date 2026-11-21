@@ -21,9 +21,9 @@ const TABLES: { key: ImportTable; label: string; file: string }[] = [
 type Status = "idle" | "uploading" | "done" | "error";
 type TableState = {
   fileName: string; status: Status; totalChunks: number; nextChunk: number;
-  inserted: number; error: string;
+  inserted: number; filled: number; error: string;
 };
-const initial: TableState = { fileName: "", status: "idle", totalChunks: 0, nextChunk: 0, inserted: 0, error: "" };
+const initial: TableState = { fileName: "", status: "idle", totalChunks: 0, nextChunk: 0, inserted: 0, filled: 0, error: "" };
 
 function distinctValues(records: ImportRecord[], field: string): (string | number)[] {
   const set = new Set<string | number>();
@@ -54,7 +54,7 @@ export default function AdminImportPage() {
       if (records.length === 0) throw new Error("文件没有数据行");
       parsed.current[table] = { runId, records };
       const totalChunks = Math.ceil(records.length / CHUNK_SIZE);
-      patch(table, { totalChunks, nextChunk: 0, inserted: 0 });
+      patch(table, { totalChunks, nextChunk: 0, inserted: 0, filled: 0 });
       await upload(table, 0);
     } catch (err) {
       patch(table, { status: "error", error: err instanceof Error ? err.message : errorMessage(err) });
@@ -68,12 +68,14 @@ export default function AdminImportPage() {
     const totalChunks = Math.ceil(records.length / CHUNK_SIZE);
     patch(table, { status: "uploading", error: "" });
     let inserted = states[table].inserted;
+    let filled = states[table].filled;
     try {
       for (let i = startChunk; i < totalChunks; i += 1) {
         const rows = records.slice(i * CHUNK_SIZE, i * CHUNK_SIZE + CHUNK_SIZE);
         const result = await postImportChunk({ table, run_id: runId, chunk_index: i, rows });
         inserted += result.inserted;
-        patch(table, { nextChunk: i + 1, inserted });
+        filled += result.filled ?? 0;
+        patch(table, { nextChunk: i + 1, inserted, filled });
       }
       await publishMeta(table, records);
       patch(table, { status: "done", nextChunk: totalChunks });
@@ -125,7 +127,8 @@ export default function AdminImportPage() {
         </h1>
         <p className="text-sm text-muted-foreground">
           上传按模板整理并通过 <code>node db/import/validate.mjs</code> 校验的 CSV。
-          请按 ①→②→③ 顺序导入（录取表引用院校清单）。同一文件重复导入不会产生重复数据。
+          请按 ①→②→③ 顺序导入（录取表引用院校清单）。同一文件重复导入不会产生重复数据；
+          重导入院校清单可为已有院校补全空白的基础信息列（不覆盖已有值）。
         </p>
       </div>
 
@@ -137,7 +140,7 @@ export default function AdminImportPage() {
               <CardTitle className="text-base">{label} <span className="text-sm font-normal text-muted-foreground">（{file}）</span></CardTitle>
               <CardDescription>
                 {s.fileName
-                  ? `${s.fileName} · 共 ${s.totalChunks} 块 · 已写入 ${s.inserted} 行`
+                  ? `${s.fileName} · 共 ${s.totalChunks} 块 · 已写入 ${s.inserted} 行${s.filled > 0 ? ` · 补全基础信息 ${s.filled} 行` : ""}`
                   : "尚未选择文件"}
               </CardDescription>
             </CardHeader>

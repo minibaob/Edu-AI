@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Building2, Search } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Link } from "@/src/lib/router";
+import { Link, navigate, useRoute } from "@/src/lib/router";
 import {
   errorMessage, getUniversities, getUniversityDetail,
 } from "@/src/lib/api";
@@ -25,30 +26,79 @@ function distinct<T>(items: T[]): T[] {
 }
 
 export default function UniversitiesPage({ code }: { code?: string }) {
-  return code ? <DetailView code={code} /> : <ListView />;
-}
-
-function ListView() {
+  const route = useRoute();
+  const requestedProvince = new URLSearchParams(route.split("?")[1]).get("province") ?? "";
   const [data, setData] = useState<UniversitiesResponse | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [query, setQuery] = useState("");
-  const [page, setPage] = useState(0);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const result = await getUniversities();
-        if (!cancelled) setData(result);
-      } catch (err) {
-        if (!cancelled) setError(errorMessage(err));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
+    setLoading(true);
+    setError("");
+    getUniversities()
+      .then((result) => { if (!cancelled) setData(result); })
+      .catch((err) => { if (!cancelled) setError(errorMessage(err)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [retry]);
+
+  const provinces = distinct([...(data?.score_facets.provinces ?? []), ...(data?.plan_facets.provinces ?? [])]);
+  const province = provinces.includes(requestedProvince) ? requestedProvince : "";
+
+  function chooseProvince(value: string) {
+    const path = !province && code ? `/universities/${code}` : "/universities";
+    navigate(value ? `${path}?province=${encodeURIComponent(value)}` : "/universities");
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h1 className="flex items-center gap-2 text-xl font-bold">
+          <Building2 className="size-6 text-primary" aria-hidden /> 高校与录取数据查询
+        </h1>
+        <p className="text-sm text-muted-foreground">先选择参加高考的省份，再选择高校，查看该省录取分数和招生计划。</p>
+      </div>
+      {loading && <p role="status" className="py-12 text-center text-sm text-muted-foreground">正在加载省份与院校数据…</p>}
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription className="flex flex-wrap items-center gap-3">
+            {error}<Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>重试加载</Button>
+          </AlertDescription>
+        </Alert>
+      )}
+      {!loading && !error && data && (
+        <>
+          <Card className="border-primary/20 bg-accent/30">
+            <CardHeader>
+              <CardTitle className="text-base">第一步：选择高考省份</CardTitle>
+              <CardDescription>这里选择的是生源省份，不是大学所在地。仅提供已收录的官方数据。</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-2">
+              <Label htmlFor="admission-province">高考省份</Label>
+              <select id="admission-province" className={`${selectClass} w-full bg-card sm:max-w-xs`}
+                value={province} onChange={(e) => chooseProvince(e.target.value)} disabled={provinces.length === 0}>
+                <option value="">请选择高考省份</option>
+                {provinces.map((item) => <option key={item} value={item}>{item}省</option>)}
+              </select>
+              {requestedProvince && !province && <p role="alert" className="text-sm text-destructive">该省份暂无已收录数据，请重新选择。</p>}
+              {provinces.length === 0 && <p className="text-sm text-muted-foreground">暂无可查询的省份，官方数据整理导入后即可查询。</p>}
+            </CardContent>
+          </Card>
+          {!province && provinces.length > 0 && <p className="py-8 text-center text-sm text-muted-foreground">请先选择高考省份，再查找高校。</p>}
+          {province && (code
+            ? <DetailView key={`${province}:${code}`} code={code} province={province} />
+            : <ListView key={province} data={data} province={province} />)}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ListView({ data, province }: { data: UniversitiesResponse; province: string }) {
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
 
   const filtered = useMemo(() => {
     const list = data?.universities ?? [];
@@ -64,18 +114,11 @@ function ListView() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h1 className="flex items-center gap-2 text-xl font-bold">
-          <Building2 className="size-6 text-primary" aria-hidden /> 高校与录取数据查询
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          首批试点：河北省、河南省 · 数据以各省教育考试院官方公布为准，仅供参考
-        </p>
+        <h2 className="text-lg font-semibold">第二步：选择高校 · {province}考生</h2>
+        <p className="text-sm text-muted-foreground">下方为全站已收录院校名录；所选省份未收录该校数据时，详情会显示「暂无数据」。</p>
       </div>
 
-      {loading && <p className="py-12 text-center text-sm text-muted-foreground">正在加载院校数据…</p>}
-      {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
-
-      {!loading && !error && data && data.universities.length === 0 && (
+      {data.universities.length === 0 && (
         <Card>
           <CardHeader>
             <CardTitle>暂无院校数据</CardTitle>
@@ -86,16 +129,9 @@ function ListView() {
         </Card>
       )}
 
-      {!loading && !error && data && data.universities.length > 0 && (
+      {data.universities.length > 0 && (
         <>
-          <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-            <span>共 {data.counts.universities} 所院校</span>
-            <span>· {data.counts.admission_scores} 条录取记录</span>
-            <span>· {data.counts.enrollment_plans} 条招生计划</span>
-            <span className="rounded-full bg-accent px-2.5 py-0.5 text-xs text-accent-foreground">
-              试点省份：{(data.score_facets.provinces ?? []).join('、') || '暂无数据'}
-            </span>
-          </div>
+          <p className="text-sm text-muted-foreground">院校名录共 {data.universities.length} 所 · 当前匹配 {filtered.length} 所</p>
 
           <div className="relative max-w-md">
             <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
@@ -114,7 +150,7 @@ function ListView() {
                 {visible.map((u) => (
                   <li key={u.code}>
                     <Link
-                      to={`/universities/${u.code}`}
+                      to={`/universities/${encodeURIComponent(u.code)}?province=${encodeURIComponent(province)}`}
                       className="flex items-center justify-between gap-3 px-4 py-3 hover:bg-accent"
                     >
                       <span className="font-medium">{u.name}</span>
@@ -146,69 +182,61 @@ function ListView() {
   );
 }
 
-function DetailView({ code }: { code: string }) {
+function DetailView({ code, province }: { code: string; province: string }) {
   const [data, setData] = useState<UniversityDetail | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [yearFilter, setYearFilter] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [batchFilter, setBatchFilter] = useState("");
-  const [provinceFilter, setProvinceFilter] = useState("");
-  const [planProvinceFilter, setPlanProvinceFilter] = useState("");
-
-  async function load(planYear?: number) {
-    setLoading(true);
-    setError("");
-    try {
-      setData(await getUniversityDetail(code, planYear));
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setLoading(false);
-    }
-  }
+  const [planYear, setPlanYear] = useState<number>();
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
-    // 切换院校时重置筛选，避免上一所的省份/年份筛选把新院校数据滤成「暂无数据」。
-    setYearFilter("");
-    setCategoryFilter("");
-    setBatchFilter("");
-    setProvinceFilter("");
-    setPlanProvinceFilter("");
-    load();
-  }, [code]);
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    getUniversityDetail(code, planYear, province)
+      .then((result) => { if (!cancelled) setData(result); })
+      .catch((err) => { if (!cancelled) setError(errorMessage(err)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [code, province, planYear, retry]);
 
-  const scores = data?.scores ?? [];
+  const scores = (data?.scores ?? []).filter((s) => s.province === province);
   const scoreYears = distinct(scores.map((s) => s.year)).sort((a, b) => b - a);
   const scoreCategories = distinct(scores.map((s) => s.category));
   const scoreBatches = distinct(scores.map((s) => s.batch));
-  const scoreProvinces = distinct(scores.map((s) => s.province));
-  const planProvinces = distinct((data?.plans ?? []).map((p) => p.province));
-  const filteredPlans = (data?.plans ?? []).filter((p) => planProvinceFilter === "" || p.province === planProvinceFilter);
+  const filteredPlans = (data?.plans ?? []).filter((p) => p.province === province);
 
   const filteredScores = scores.filter((s) =>
     (yearFilter === "" || s.year === Number(yearFilter))
     && (categoryFilter === "" || s.category === categoryFilter)
-    && (batchFilter === "" || s.batch === batchFilter)
-    && (provinceFilter === "" || s.province === provinceFilter));
+    && (batchFilter === "" || s.batch === batchFilter));
 
   const u = data?.university;
 
   return (
     <div className="flex flex-col gap-4">
-      <Link to="/universities" className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="size-4" aria-hidden /> 返回院校列表
+      <Link to={`/universities?province=${encodeURIComponent(province)}`} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+        <ArrowLeft className="size-4" aria-hidden /> 返回{province}考生院校查询
       </Link>
 
-      {loading && <p className="py-12 text-center text-sm text-muted-foreground">正在加载院校详情…</p>}
-      {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
+      {loading && <p role="status" className="py-12 text-center text-sm text-muted-foreground">正在加载{province}录取与招生数据…</p>}
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription className="flex flex-wrap items-center gap-3">
+            {error}<Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>重试详情</Button>
+          </AlertDescription>
+        </Alert>
+      )}
 
       {!loading && !error && u && (
         <>
           <Card>
             <CardHeader>
               <CardTitle className="text-lg">{u.name}</CardTitle>
-              <CardDescription>院校代码 {u.code}</CardDescription>
+              <CardDescription>院校代码 {u.code} · 当前查看：{province}考生数据</CardDescription>
             </CardHeader>
             <CardContent>
               <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
@@ -216,7 +244,14 @@ function DetailView({ code }: { code: string }) {
                 <div><dt className="text-muted-foreground">所在城市</dt><dd>{nd(u.city)}</dd></div>
                 <div><dt className="text-muted-foreground">办学类型</dt><dd>{nd(u.type)}</dd></div>
                 <div><dt className="text-muted-foreground">办学层次</dt><dd>{nd(u.level)}</dd></div>
-                <div><dt className="text-muted-foreground">标签</dt><dd>{nd(u.tags)}</dd></div>
+                <div>
+                  <dt className="text-muted-foreground">标签</dt>
+                  <dd>
+                    {u.tags
+                      ? <span className="flex flex-wrap gap-1">{u.tags.split("|").filter(Boolean).map((tag) => <Badge key={tag} variant="secondary">{tag}</Badge>)}</span>
+                      : "暂无数据"}
+                  </dd>
+                </div>
                 <div>
                   <dt className="text-muted-foreground">招生网址</dt>
                   <dd>
@@ -226,20 +261,23 @@ function DetailView({ code }: { code: string }) {
                   </dd>
                 </div>
               </dl>
+              <p className="mt-3 text-xs text-muted-foreground">
+                基础信息为全国通用，不随考生省份变化；录取分数与招生计划按考生省份查询。
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground break-words">数据来源：{u.source}</p>
+              {u.note && <p className="mt-1 text-xs text-muted-foreground break-words">{u.note}</p>}
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">历年录取分数 / 位次</CardTitle>
+              <CardTitle className="text-base">{province} · 历年录取分数 / 位次</CardTitle>
               <CardDescription>
                 最低分含艺术/体育类综合分（带小数，口径见各条备注）；缺失字段显示「暂无数据」。
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
               <div className="flex flex-wrap gap-3">
-                <FilterSelect label="省份" value={provinceFilter} onChange={setProvinceFilter}
-                  options={scoreProvinces.map((p) => ({ value: p, label: p }))} />
                 <FilterSelect label="年份" value={yearFilter} onChange={setYearFilter}
                   options={scoreYears.map((y) => ({ value: String(y), label: `${y} 年` }))} />
                 <FilterSelect label="科类" value={categoryFilter} onChange={setCategoryFilter}
@@ -253,8 +291,8 @@ function DetailView({ code }: { code: string }) {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">招生计划</CardTitle>
-              <CardDescription>按学校名称关联当年各试点省份招生计划；同专业可能因办学地点不同有多行。</CardDescription>
+              <CardTitle className="text-base">{province} · 招生计划</CardTitle>
+              <CardDescription>仅显示面向{province}考生的已收录计划，默认展示该校在本省最新有数据的年份；同专业可能因办学地点不同有多行。</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
               {data && data.plan_years.length > 0 && (
@@ -264,13 +302,12 @@ function DetailView({ code }: { code: string }) {
                     <select
                       id="plan-year" className={selectClass}
                       value={data.plan_year ?? ""}
-                      onChange={(e) => load(Number(e.target.value))}
+                      onChange={(e) => setPlanYear(Number(e.target.value))}
                     >
+                      {data.plan_year === null && <option value="" disabled>暂无已收录计划</option>}
                       {data.plan_years.map((y) => <option key={y} value={y}>{y} 年</option>)}
                     </select>
                   </div>
-                  <FilterSelect label="省份" value={planProvinceFilter} onChange={setPlanProvinceFilter}
-                    options={planProvinces.map((p) => ({ value: p, label: p }))} />
                 </div>
               )}
               <PlanTable rows={filteredPlans} />
