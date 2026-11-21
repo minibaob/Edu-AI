@@ -57,6 +57,284 @@ const login = (handle, username, password = PASSWORD) => call(handle, ctx('/api/
 const me = (handle, cookie) => call(handle, ctx('/api/me', { cookie }));
 const uniqueName = (prefix = 'user') => `${prefix}${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`;
 
+test('河北一分一段参考：三年来源、日期和官方普通类PDF地址对应正确', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const references = JSON.parse(await readFile(new URL('../src/lib/hebei-score-references.json', import.meta.url), 'utf8'));
+  assert.equal(references.province, '河北');
+  assert.equal(references.source, '河北省教育考试院');
+  assert.equal(references.scoreBasis, '含优惠分');
+  assert.equal(references.format, 'scanned-pdf');
+  assert.deepEqual(references.categories, ['物理类', '历史类']);
+  assert.deepEqual(references.years.map((item) => item.year), [2026, 2025, 2024]);
+  const verified = {
+    2026: ['https://www.hebeea.edu.cn/c/2026-06-24/493215.html', 'https://file.hebeea.edu.cn/upload/resources/file/2026/06/24/27144.pdf'],
+    2025: ['https://www.hebeea.edu.cn/c/2025-06-24/488903.html', 'https://file.hebeea.edu.cn/files/article/2025/06/20250624193800_658.pdf'],
+    2024: ['https://www.hebeea.edu.cn/c/2024-06-24/489444.html', 'https://file.hebeea.edu.cn/files/article/2024/06/20240624195327_41.pdf'],
+  };
+  for (const item of references.years) {
+    assert.equal(item.publishedAt, `${item.year}-06-24`);
+    assert.deepEqual([item.sourceUrl, item.pdfUrl], verified[item.year]);
+  }
+  assert.equal(references.years[0].reportUrl, 'https://www.hebtv.com/19/19js/zx/snsz/12389865.shtml');
+});
+
+const simulationPath = (extra = {}) => `/api/simulation?${new URLSearchParams({ province: '河北', category: '物理类', batch: '本科批', score: '600', ...extra })}`;
+async function seedSimulation(db, records) {
+  const schools = [...new Map(records.map((row) => [row.university_code, { code: row.university_code, name: `测试院校${row.university_code}` }])).values()];
+  assert.equal((await db.from('universities').insertIfAbsent(schools, { onConflict: 'code' })).error, null);
+  const scores = records.map((row, i) => ({
+    id: `simulation-${String(i).padStart(5, '0')}`, province: '河北', category: '物理类', batch: '本科批', year: 2026,
+    school_name: `测试院校${row.university_code}`, source: '本地合成 fixture（非真实高校数据）', min_rank: null, ...row,
+  }));
+  assert.equal((await db.from('admission_scores').insertIfAbsent(scores, { onConflict: 'id' })).error, null);
+}
+
+test('模拟填报：公开只读，冲稳保边界10/0/-10/-11、绝对分差排序和原文来源', async () => {
+  const { db, handle, control } = fixture();
+  await seedSimulation(db, [610, 600, 590, 589, 611, 601, 599].map((score, i) => ({
+    university_code: `u${i}`, min_score: String(score), source: '测试来源 原文 / <标签> & 标点。',
+  })));
+  control.writes.length = 0;
+  const result = await call(handle, ctx(simulationPath(), { origin: null }));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.year, 2026);
+  assert.deepEqual(Object.fromEntries(Object.entries(result.body.groups).map(([k, g]) => [k, g.items.map((r) => r.d)])), {
+    chong: [1, 10], wen: [0, -1, -10], bao: [-11],
+  });
+  assert.equal(result.body.outside_range_count, 1);
+  assert.equal(result.body.skipped_universities, 0);
+  assert.equal(result.body.limit, 20);
+  for (const group of Object.values(result.body.groups)) {
+    assert.equal(group.total, group.items.length);
+    assert.ok(group.items.every((r) => r.year === 2026 && r.source === '测试来源 原文 / <标签> & 标点。' && r.d === r.min_score - 600));
+  }
+  assert.deepEqual(control.writes, []);
+  assert.match(result.headers.get('cache-control'), /no-store/);
+  assert.equal((await call(handle, ctx('/api/simulation', { method: 'POST', body: {} }))).status, 405);
+  assert.equal((await call(handle, ctx('/api/simulation/options', { method: 'POST', body: {} }))).status, 405);
+});
+
+test('河北一分一段参考：查阅往年不改变模拟最新年、不补高校空位次、不写库', async () => {
+  const { db, handle, control } = fixture();
+  await seedSimulation(db, [
+    { university_code: 'current', min_score: '600', year: 2026, min_rank: null },
+    { university_code: 'previous', min_score: '605', year: 2024, min_rank: 10000 },
+  ]);
+  control.writes.length = 0;
+  const current = await call(handle, ctx(simulationPath({ rank: '20000' })));
+  for (const year of ['2024', '2025']) {
+    const res = await call(handle, ctx(simulationPath({ rank: '20000', year })));
+    assert.deepEqual(res.body, current.body);
+    assert.equal(res.body.year, 2026);
+    assert.equal('min_rank' in res.body.groups.wen.items[0], false);
+    assert.equal('rank_difference' in res.body.groups.wen.items[0], false);
+  }
+  assert.deepEqual(control.writes, []);
+});
+
+test('模拟填报：最新年严格按省科类批次选取，旧年/他省/其他科类批次不凑数', async () => {
+  const { db, handle } = fixture();
+  await seedSimulation(db, [
+    { university_code: 'latest', min_score: '605', year: 2026 },
+    { university_code: 'older-only', min_score: '600', year: 2025 },
+    { university_code: 'henan', min_score: '598', province: '河南', year: 2025 },
+    { university_code: 'history', min_score: '599', category: '历史类', year: 2027 },
+    { university_code: 'college', min_score: '580', batch: '专科批', year: 2028 },
+  ]);
+  const result = await call(handle, ctx(simulationPath()));
+  assert.equal(result.body.year, 2026);
+  assert.deepEqual(result.body.groups.chong.items.map((r) => r.university_code), ['latest']);
+  assert.equal(result.body.groups.wen.total, 0);
+  assert.equal(result.body.groups.bao.total, 0);
+  assert.equal(result.body.skipped_universities, 4);
+  assert.equal('skipped_items' in result.body, false);
+  const henan = await call(handle, ctx(simulationPath({ province: '河南' })));
+  assert.equal(henan.body.year, 2025);
+  assert.deepEqual(henan.body.groups.wen.items.map((r) => r.university_code), ['henan']);
+  const none = await call(handle, ctx(simulationPath({ batch: '不存在的批次' })));
+  assert.equal(none.status, 200);
+  assert.equal(none.body.year, null);
+  assert.equal(none.body.available, false);
+  assert.equal(none.body.skipped_universities, 5);
+});
+
+test('模拟填报：不支持省份和空库返回暂无数据，非法分数位次/筛选400', async () => {
+  const { db, handle } = fixture();
+  await seedSimulation(db, [{ university_code: 'local', min_score: '600' }]);
+  const other = await call(handle, ctx(simulationPath({ province: '广东' })));
+  assert.equal(other.status, 200);
+  assert.equal(other.body.message, '暂无数据，采集中');
+  assert.equal(other.body.available, false);
+  assert.equal(other.body.skipped_universities, 1);
+  assert.ok(Object.values(other.body.groups).every((g) => g.total === 0 && g.items.length === 0));
+  for (const score of ['', '-1', '751', '600.5', '1e2', 'Infinity', 'NaN', '0x10', '600分']) {
+    assert.equal((await call(handle, ctx(simulationPath({ score })))).status, 400, score);
+  }
+  assert.equal((await call(handle, ctx('/api/simulation?province=河北&category=物理类&batch=本科批'))).status, 400);
+  for (const rank of ['0', '-1', '1.2', 'NaN', '9007199254740992', '1e4', ' 2 ']) {
+    assert.equal((await call(handle, ctx(simulationPath({ rank })))).status, 400, rank);
+  }
+  for (const extra of [{ category: '综合' }, { batch: '' }, { offset: '-1' }, { offset: '1.5' }, { offset: '1000001' }]) {
+    assert.equal((await call(handle, ctx(simulationPath(extra)))).status, 400);
+  }
+  assert.equal((await call(handle, ctx(`${simulationPath()}&score=500`))).status, 400);
+  for (const score of ['0', '750']) assert.equal((await call(handle, ctx(simulationPath({ score })))).status, 200);
+  assert.equal((await call(handle, ctx(simulationPath({ rank: '' })))).status, 200);
+  const empty = await call(fixture().handle, ctx(simulationPath()));
+  assert.equal(empty.status, 200);
+  assert.equal(empty.body.message, '暂无数据，采集中');
+});
+
+test('模拟填报：跳过无法完整解析的最低分，保留小数，不用旧年补无效分数', async () => {
+  const { db, handle } = fixture();
+  const bad = [null, '', ' ', 'abc', '600分', 'Infinity', 'NaN', '0x258', '600/700'];
+  await seedSimulation(db, [
+    ...bad.map((min_score, i) => ({ university_code: `bad${i}`, min_score })),
+    { university_code: 'decimal', min_score: '599.5' },
+    { university_code: 'bad0', min_score: '600', year: 2025, id: 'old-valid' },
+  ]);
+  const result = await call(handle, ctx(simulationPath()));
+  assert.equal(result.body.invalid_score_rows, bad.length);
+  assert.equal(result.body.skipped_universities, 0, '有记录但分数无效不能统计为无记录');
+  assert.equal(result.body.groups.wen.total, 1);
+  assert.equal(result.body.groups.wen.items[0].d, -0.5);
+  const onlyInvalid = fixture();
+  await seedSimulation(onlyInvalid.db, [
+    { university_code: 'a', min_score: null },
+    { university_code: 'a', min_score: '600', year: 2025 },
+  ]);
+  const res = await call(onlyInvalid.handle, ctx(simulationPath()));
+  assert.equal(res.body.year, 2026);
+  assert.equal(res.body.invalid_score_rows, 1);
+  assert.ok(Object.values(res.body.groups).every((g) => g.total === 0));
+});
+
+test('模拟填报：位次仅有真实值并提交位次时展示，不参与分档排序', async () => {
+  const { db, handle } = fixture();
+  await seedSimulation(db, [
+    { university_code: 'has-rank', min_score: '600', min_rank: 12345 },
+    { university_code: 'no-rank', min_score: '601', min_rank: null },
+  ]);
+  const plain = (await call(handle, ctx(simulationPath()))).body;
+  const ranked = (await call(handle, ctx(simulationPath({ rank: '12000' })))).body;
+  assert.equal(ranked.groups.wen.items[0].min_rank, 12345);
+  assert.equal(ranked.groups.wen.items[0].rank_difference, 345);
+  assert.equal('min_rank' in plain.groups.wen.items[0], false);
+  assert.equal('rank_difference' in plain.groups.wen.items[0], false);
+  assert.equal('min_rank' in ranked.groups.chong.items[0], false);
+  assert.equal('rank_difference' in ranked.groups.chong.items[0], false);
+  for (const key of ['chong', 'wen', 'bao']) {
+    assert.deepEqual(plain.groups[key].items.map((r) => r.university_code), ranked.groups[key].items.map((r) => r.university_code));
+  }
+  const worse = (await call(handle, ctx(simulationPath({ rank: '13000' })))).body;
+  assert.equal(worse.groups.wen.items[0].rank_difference, -655);
+});
+
+test('模拟填报：完整读取超千行、每档20所、offset无重叠且同分稳定排序', async () => {
+  const { db, handle } = fixture();
+  await seedSimulation(db, Array.from({ length: 1203 }, (_, i) => ({
+    university_code: `u${String(i).padStart(4, '0')}`, min_score: ['605', '595', '589'][i % 3],
+  })));
+  const first = (await call(handle, ctx(simulationPath()))).body;
+  const second = (await call(handle, ctx(simulationPath({ offset: '20' })))).body;
+  const last = (await call(handle, ctx(simulationPath({ offset: '400' })))).body;
+  assert.equal(first.skipped_universities, 0);
+  for (const key of ['chong', 'wen', 'bao']) {
+    assert.equal(first.groups[key].total, 401);
+    assert.equal(first.groups[key].items.length, 20);
+    assert.equal(second.groups[key].items.length, 20);
+    assert.equal(last.groups[key].items.length, 1);
+    const codes = [...first.groups[key].items, ...second.groups[key].items].map((r) => r.university_code);
+    assert.equal(new Set(codes).size, 40);
+    assert.deepEqual(codes, [...codes].sort());
+  }
+  const past = (await call(handle, ctx(simulationPath({ offset: '1000' })))).body;
+  assert.ok(Object.values(past.groups).every((g) => g.total === 401 && g.items.length === 0));
+});
+
+test('模拟填报：选项仅本省真实科类批次，年份按每个组合独立取最新', async () => {
+  const { db, handle } = fixture();
+  await seedSimulation(db, [
+    { university_code: 'a', min_score: '600', year: 2025 },
+    { university_code: 'b', min_score: '600', year: 2026 },
+    { university_code: 'c', min_score: '600', category: '历史类', batch: '专科批', year: 2024 },
+    { university_code: 'd', min_score: '600', category: '艺术类', batch: '艺术批', year: 2026 },
+    { university_code: 'e', min_score: '600', province: '河南', batch: '高职高专批', year: 2025 },
+  ]);
+  const res = await call(handle, ctx('/api/simulation/options?province=河北'));
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.options, [
+    { category: '物理类', batches: [{ batch: '本科批', year: 2026 }] },
+    { category: '历史类', batches: [{ batch: '专科批', year: 2024 }] },
+  ]);
+  assert.equal(res.body.rules.chong, '冲：0 < d ≤ 10（该校线比我高 10 分以内，够一够）。');
+  const other = await call(handle, ctx('/api/simulation/options?province=广东'));
+  assert.equal(other.body.available, false);
+  assert.deepEqual(other.body.options, []);
+});
+
+test('模拟填报：数据库分页被截短时继续读取，仅读两表且从不写库', async () => {
+  const { db } = fixture();
+  await seedSimulation(db, Array.from({ length: 83 }, (_, i) => ({ university_code: `s${i}`, min_score: '600' })));
+  const touched = new Set();
+  const readOnly = { from(table) {
+    assert.ok(['admission_scores', 'universities'].includes(table));
+    touched.add(table);
+    return { select(columns) {
+      const query = db.from(table).select(columns);
+      const range = query.range.bind(query);
+      query.range = (from, to) => range(from, Math.min(to, from + 16));
+      return query;
+    } };
+  } };
+  const handle = createApplication({ db: readOnly, origin: PUBLIC_ORIGIN });
+  const result = await call(handle, ctx(simulationPath()));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.groups.wen.total, 83);
+  assert.equal(result.body.skipped_universities, 0);
+  assert.deepEqual([...touched].sort(), ['admission_scores', 'universities']);
+});
+
+test('模拟填报：选项扫描跨页，不因500行上限漏掉真实科类批次', async () => {
+  const { db, handle } = fixture();
+  await seedSimulation(db, [
+    ...Array.from({ length: 501 }, (_, i) => ({ university_code: `s${i}`, min_score: '600' })),
+    { university_code: 'last-page', min_score: '400', category: '历史类', batch: '专科批', year: 2025 },
+  ]);
+  const result = await call(handle, ctx('/api/simulation/options?province=河北'));
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.options[1], { category: '历史类', batches: [{ batch: '专科批', year: 2025 }] });
+});
+
+test('模拟填报：适配器忽略分页时明确失败，不能重复累计或无限读取', async () => {
+  const db = { from(table) {
+    const query = {
+      select() { return query; }, order() { return query; },
+      range() { return Promise.resolve({ data: table === 'universities' ? [{ code: 'u1', name: '本地测试' }] : [], error: null }); },
+    };
+    return query;
+  } };
+  const result = await call(createApplication({ db, origin: PUBLIC_ORIGIN }), ctx(simulationPath()));
+  assert.equal(result.status, 503);
+  assert.equal(result.body.error, 'database_unavailable');
+});
+
+test('模拟填报：数据库中途失败不可返回部分结果冒充总数', async () => {
+  const { db } = fixture();
+  await seedSimulation(db, Array.from({ length: 501 }, (_, i) => ({ university_code: `s${i}`, min_score: '600' })));
+  const failingDb = { from(table) { return { select(columns) {
+    const query = db.from(table).select(columns);
+    const range = query.range.bind(query);
+    query.range = (from, to) => table === 'admission_scores' && from > 0
+      ? Promise.resolve({ data: null, error: { code: 'read_failed' } }) : range(from, to);
+    return query;
+  } }; } };
+  const result = await call(createApplication({ db: failingDb, origin: PUBLIC_ORIGIN }), ctx(simulationPath()));
+  assert.equal(result.status, 503);
+  assert.equal(result.body.error, 'database_unavailable');
+  assert.equal('groups' in result.body, false);
+});
+
 const WRONG_QUESTION = {
   subject: '数学', grade: '高二', chapter: '函数', source: '练习',
   question: '本地测试题：2 + 3 = ?', correct_answer: '5', my_answer: '4', reason: '计算失误', note: '本地合成测试数据',

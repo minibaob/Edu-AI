@@ -4,6 +4,7 @@ import { useRoute } from "@/src/lib/router";
 import HomePage from "@/src/pages/home";
 import ResourcesPage from "@/src/pages/resources";
 import UniversitiesPage from "@/src/pages/universities";
+import SimulationPage from "@/src/pages/simulation";
 import AssessmentPage from "@/src/pages/assessment";
 import ProfilePage from "@/src/pages/profile";
 import WrongQuestionsPage from "@/src/pages/wrong-questions";
@@ -24,6 +25,9 @@ export default function App() {
         break;
       case "/universities":
         page = <UniversitiesPage />;
+        break;
+      case "/simulation":
+        page = <SimulationPage />;
         break;
       case "/assessment":
         page = <AssessmentPage />;

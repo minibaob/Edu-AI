@@ -1,0 +1,31 @@
+{
+  "province": "河北",
+  "source": "河北省教育考试院",
+  "categories": ["物理类", "历史类"],
+  "scoreBasis": "含优惠分",
+  "format": "scanned-pdf",
+  "verifiedAt": "2026-11-21",
+  "years": [
+    {
+      "year": 2026,
+      "publishedAt": "2026-06-24",
+      "sourceUrl": "https://www.hebeea.edu.cn/c/2026-06-24/493215.html",
+      "pdfUrl": "https://file.hebeea.edu.cn/upload/resources/file/2026/06/24/27144.pdf",
+      "reportUrl": "https://www.hebtv.com/19/19js/zx/snsz/12389865.shtml"
+    },
+    {
+      "year": 2025,
+      "publishedAt": "2025-06-24",
+      "sourceUrl": "https://www.hebeea.edu.cn/c/2025-06-24/488903.html",
+      "pdfUrl": "https://file.hebeea.edu.cn/files/article/2025/06/20250624193800_658.pdf",
+      "reportUrl": null
+    },
+    {
+      "year": 2024,
+      "publishedAt": "2024-06-24",
+      "sourceUrl": "https://www.hebeea.edu.cn/c/2024-06-24/489444.html",
+      "pdfUrl": "https://file.hebeea.edu.cn/files/article/2024/06/20240624195327_41.pdf",
+      "reportUrl": null
+    }
+  ]
+}
