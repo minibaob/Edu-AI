@@ -3,7 +3,7 @@
 // 绝不使用 ctx.user、平台身份、Host 头或浏览器提交的 owner_id。
 import { AppError, applicationPath, errorJson, json, readJson, requireTrustedOrigin, rows } from './http.mjs';
 import { canonicalUsername, validatePassword, validateProfile } from './validate.mjs';
-import { isUuid, parseListQuery, parseMajorQuery, validateFileResourceInput, validateResourceInput } from './validate.mjs';
+import { isUuid, parseListQuery, parseMajorQuery, parseUniversityQuery, validateFileResourceInput, validateResourceInput } from './validate.mjs';
 import { GRADES, RESOURCE_TYPES, SUBJECTS } from './validate.mjs';
 import { scoreAssessment, validateAnswers } from './assessment.mjs';
 import {
@@ -717,7 +717,9 @@ async function route(db, request, origin, storage) {
   }
 
   // 模块5：匿名只读查询（院校索引存 data_meta，前端做搜索/分页；详情按学校名称关联计划）。
-  if (path === '/api/universities' && request.method === 'GET') return listUniversitiesIndex(db);
+  if (path === '/api/universities' && request.method === 'GET') {
+    return listUniversitiesIndex(db, parseUniversityQuery(new URL(request.url).search));
+  }
   const universityDetail = path.match(/^\/api\/universities\/([A-Za-z0-9]{1,32})$/);
   if (universityDetail && request.method === 'GET') {
     const params = new URL(request.url).searchParams;

@@ -50,29 +50,6 @@ export type UniversityDetail = {
   plans: EnrollmentPlan[];
 };
 
-export type UniversityFilters = {
-  q?: string;
-  province?: string;
-  type?: string;
-  level?: string;
-  tag?: string;
-  limit?: number;
-  offset?: number;
-};
-
-export async function listUniversities(filters: UniversityFilters = {}): Promise<{ total: number; items: University[] }> {
-  const params = new URLSearchParams();
-  if (filters.q) params.set("q", filters.q);
-  if (filters.province) params.set("province", filters.province);
-  if (filters.type) params.set("type", filters.type);
-  if (filters.level) params.set("level", filters.level);
-  if (filters.tag) params.set("tag", filters.tag);
-  if (filters.limit !== undefined) params.set("limit", String(filters.limit));
-  if (filters.offset !== undefined) params.set("offset", String(filters.offset));
-  const query = params.toString();
-  return api<{ total: number; items: University[] }>(`/api/universities${query ? `?${query}` : ""}`);
-}
-
 export async function getUniversity(code: string): Promise<UniversityDetail> {
   return api<UniversityDetail>(`/api/universities/${encodeURIComponent(code)}`);
 }

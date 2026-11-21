@@ -1,7 +1,7 @@
 // 模块5：高校与录取数据。匿名只读查询 + 管理员（应用会话 role=admin）分块导入。
-// 查询只用已验证的适配器能力（eq / order / limit / select / insertIfAbsent / update）：
-// 院校索引与筛选选项存 data_meta，前端做搜索/分页；详情按代码/名称精确查询。
-// 导入行 id = SHA-256(run_id|table|chunk_index|行号)，同一文件重复导入幂等；
+// 查询只用已验证的适配器能力（eq / order / limit / range / select / insertIfAbsent / update）：
+// 院校列表读 universities 表（基础信息权威来源），按查询参数服务端筛选后分页返回当页；
+// 详情按代码/名称精确查询。导入行 id = SHA-256(run_id|table|chunk_index|行号)，同一文件重复导入幂等；
 // run_id 由文件内容摘要得出，浏览器不直接写数据库。
 import { AppError, errorJson, json, readJson, rows } from './http.mjs';
 import { sha256Hex } from './sessions.mjs';
@@ -22,16 +22,66 @@ export async function readMeta(db, key) {
   return found.length === 1 ? metaValue(found[0]) : null;
 }
 
-// 列表页一次性取回院校索引与筛选选项（数据量小，前端搜索/分页）。
-export async function listUniversities(db) {
-  const [index, scoreFacets, planFacets, counts] = await Promise.all([
-    readMeta(db, 'universities_index'),
+// 列表：服务端筛选 + 分页（院校基础信息读 universities 表）。
+const UNIVERSITY_COLUMNS = 'code,name,province,city,type,level,tags,website,source,note';
+const READ_PAGE_SIZE = 500;
+
+// 整表读回：按 code 排序后逐页 range 取回（与 simulation.mjs 的 readPages 同一写法）。
+// 适配器不前进即报 503，绝不静默返回截断的总数。
+async function readAllUniversities(db) {
+  const result = [];
+  let lastKey;
+  for (;;) {
+    const page = rows(await db.from('universities').select(UNIVERSITY_COLUMNS)
+      .order('code').range(result.length, result.length + READ_PAGE_SIZE - 1));
+    if (page.length === 0) return result;
+    const nextKey = page[page.length - 1].code;
+    if (nextKey === lastKey) throw new AppError('database_unavailable', 503);
+    lastKey = nextKey;
+    result.push(...page);
+  }
+}
+
+function publicUniversity(row) {
+  return {
+    code: row.code,
+    name: row.name,
+    province: row.province ?? null,
+    city: row.city ?? null,
+    type: row.type ?? null,
+    level: row.level ?? null,
+    tags: row.tags ?? null,
+    website: row.website ?? null,
+    source: row.source,
+    note: row.note ?? null,
+  };
+}
+
+// 列表：服务端筛选 + 分页。query 由路由经 parseUniversityQuery 校验后传入
+//（q ≤50 字、limit 1–100 默认 20、offset ≥0，非法值一律 400）。
+// province/type/level/tag 指院校所在地/办学类型/层次/标签，与详情接口的考生省份参数含义不同。
+export async function listUniversities(db, query) {
+  const [all, scoreFacets, planFacets, counts] = await Promise.all([
+    readAllUniversities(db),
     readMeta(db, 'score_facets'),
     readMeta(db, 'plan_facets'),
     readMeta(db, 'counts'),
   ]);
+  const needle = query.q.toLowerCase();
+  const filtered = all.filter((row) => {
+    if (query.province && row.province !== query.province) return false;
+    if (query.type && row.type !== query.type) return false;
+    if (query.level && row.level !== query.level) return false;
+    if (query.tag && !(typeof row.tags === 'string' && row.tags.split('|').includes(query.tag))) return false;
+    if (needle && !(String(row.name).toLowerCase().includes(needle) || String(row.code).toLowerCase().includes(needle))) return false;
+    return true;
+  });
+  filtered.sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
+  const total = filtered.length;
+  const items = filtered.slice(query.offset, query.offset + query.limit).map(publicUniversity);
   return json({
-    universities: Array.isArray(index) ? index : [],
+    total,
+    items,
     score_facets: scoreFacets ?? { provinces: [], years: [], categories: [], batches: [] },
     plan_facets: planFacets ?? { provinces: [], years: [], batches: [] },
     counts: counts ?? { universities: 0, admission_scores: 0, enrollment_plans: 0 },

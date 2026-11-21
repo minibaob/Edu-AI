@@ -1302,11 +1302,12 @@ const postImport = (handle, cookie, body) => call(handle, ctx('/api/admin/import
 const postMeta = (handle, cookie, body) => call(handle, ctx('/api/admin/meta', { method: 'POST', cookie, body }));
 const chunk = (table, rows, chunkIndex = 0) => ({ table, run_id: RUN_ID, chunk_index: chunkIndex, rows });
 
-test('模块5：匿名查询空库返回空索引；未知院校代码 404', async () => {
+test('模块5：匿名查询空库返回空列表；未知院校代码 404', async () => {
   const { handle } = fixture();
   const list = await call(handle, ctx('/api/universities'));
   assert.equal(list.status, 200);
-  assert.deepEqual(list.body.universities, []);
+  assert.deepEqual(list.body.items, []);
+  assert.equal(list.body.total, 0);
   assert.deepEqual(list.body.counts, { universities: 0, admission_scores: 0, enrollment_plans: 0 });
   const detail = await call(handle, ctx('/api/universities/99999'));
   assert.equal(detail.status, 404);
@@ -1392,7 +1393,10 @@ test('模块5：录取/计划导入与详情查询（计划按名称关联、同
   await postMeta(handle, cookie, { key: 'counts', value: { universities: 1, admission_scores: 2, enrollment_plans: 2 } });
 
   const list = await call(handle, ctx('/api/universities'));
-  assert.deepEqual(list.body.universities, [{ code: '10003', name: '清华大学' }]);
+  assert.equal(list.body.total, 1);
+  assert.equal(list.body.items.length, 1);
+  assert.equal(list.body.items[0].code, '10003');
+  assert.equal(list.body.items[0].name, '清华大学');
   assert.equal(list.body.counts.admission_scores, 2);
 
   const detail = await call(handle, ctx('/api/universities/10003?year=2025'));
@@ -1406,6 +1410,128 @@ test('模块5：录取/计划导入与详情查询（计划按名称关联、同
 
   const noYear = await call(handle, ctx('/api/universities/10003?year=2024'));
   assert.equal(noYear.body.plans.length, 0, '无该年计划时返回空（前端显示暂无数据）');
+});
+
+// 列表服务端筛选/分页的 fixture：仅测试用，不代表真实招生口径。
+const LIST_SCHOOLS = [
+  { code: '10003', name: '清华大学', province: '北京', city: '北京市', type: '综合', level: '本科', tags: '985|211|双一流|公办', website: null, source: UNI_SOURCE, note: null },
+  { code: '10001', name: '北京大学', province: '北京', city: '北京市', type: '综合', level: '本科', tags: '985|211|双一流|公办', website: null, source: UNI_SOURCE, note: null },
+  { code: '10010', name: '北京航空航天大学', province: '北京', city: '北京市', type: '理工', level: '本科', tags: '985|211|双一流|公办', website: null, source: UNI_SOURCE, note: null },
+  { code: '10055', name: '南开大学', province: '天津', city: '天津市', type: '综合', level: '本科', tags: '985|211|双一流|公办', website: null, source: UNI_SOURCE, note: null },
+  { code: '10334', name: '浙江理工大学', province: '浙江', city: '杭州市', type: '理工', level: '本科', tags: '公办', website: null, source: UNI_SOURCE, note: null },
+  { code: '10486', name: '武汉大学', province: '湖北', city: '武汉市', type: '综合', level: '本科', tags: '985|211|双一流|公办', website: null, source: UNI_SOURCE, note: null },
+  { code: '10183', name: '吉林大学', province: '吉林', city: '长春市', type: '综合', level: '本科', tags: '985|211|双一流|公办', website: null, source: UNI_SOURCE, note: null },
+  { code: '11078', name: '广州大学', province: '广东', city: '广州市', type: '综合', level: '本科', tags: '公办', website: null, source: UNI_SOURCE, note: null },
+  { code: '12808', name: '北京工业职业技术学院', province: '北京', city: '北京市', type: '理工', level: '专科', tags: '公办', website: null, source: UNI_SOURCE, note: null },
+  { code: '13000', name: '三亚学院', province: '海南', city: '三亚市', type: '综合', level: '本科', tags: '民办', website: null, source: UNI_SOURCE, note: null },
+  { code: 'T001', name: '测试学院', province: '北京', city: '北京市', type: '其他', level: '本科', tags: '民办', website: null, source: UNI_SOURCE, note: null },
+];
+async function seedListSchools(db, rows = LIST_SCHOOLS) {
+  assert.equal((await db.from('universities').insertIfAbsent(rows, { onConflict: 'code' })).error, null);
+}
+
+test('模块5：高校列表服务端筛选（省份/类型/层次/标签）', async () => {
+  const { db, handle } = fixture();
+  await seedListSchools(db);
+  const byProvince = await call(handle, ctx('/api/universities?province=北京'));
+  assert.equal(byProvince.status, 200);
+  assert.equal(byProvince.body.total, 5);
+  assert.deepEqual(byProvince.body.items.map((u) => u.code).sort(), ['10001', '10003', '10010', '12808', 'T001']);
+  const byType = await call(handle, ctx('/api/universities?type=理工'));
+  assert.equal(byType.body.total, 3);
+  const byLevel = await call(handle, ctx('/api/universities?level=专科'));
+  assert.equal(byLevel.body.total, 1);
+  assert.equal(byLevel.body.items[0].code, '12808');
+  const byTag = await call(handle, ctx('/api/universities?tag=民办'));
+  assert.equal(byTag.body.total, 2);
+  const combined = await call(handle, ctx('/api/universities?province=北京&type=理工'));
+  assert.equal(combined.body.total, 2);
+  assert.deepEqual(combined.body.items.map((u) => u.code).sort(), ['10010', '12808']);
+  // 筛选面与计数照常返回（来自 data_meta，未写入时为空/零）。
+  assert.deepEqual(byProvince.body.score_facets, { provinces: [], years: [], categories: [], batches: [] });
+  assert.deepEqual(byProvince.body.counts, { universities: 0, admission_scores: 0, enrollment_plans: 0 });
+});
+
+test('模块5：高校列表 q 搜索（名称/代码子串，不区分大小写）', async () => {
+  const { db, handle } = fixture();
+  await seedListSchools(db);
+  const byName = await call(handle, ctx('/api/universities?q=清华'));
+  assert.equal(byName.body.total, 1);
+  assert.equal(byName.body.items[0].code, '10003');
+  const byCode = await call(handle, ctx('/api/universities?q=10003'));
+  assert.equal(byCode.body.total, 1);
+  const all = await call(handle, ctx('/api/universities?q=大学'));
+  assert.equal(all.body.total, 8, '名称含“大学”的 8 所（测试学院/三亚学院/北京工业职业技术学院不含）');
+  const lower = await call(handle, ctx('/api/universities?q=t001'));
+  assert.equal(lower.body.total, 1, '小写 q 匹配大写代码');
+  assert.equal(lower.body.items[0].code, 'T001');
+  const none = await call(handle, ctx('/api/universities?q=不存在的学校'));
+  assert.equal(none.body.total, 0);
+  assert.deepEqual(none.body.items, []);
+});
+
+test('模块5：高校列表服务端分页（limit/offset 无重叠、总数一致、越界空页、默认 20）', async () => {
+  const { db, handle } = fixture();
+  await seedListSchools(db);
+  const pages = [];
+  for (const offset of [0, 2, 4, 6, 8, 10]) {
+    const res = await call(handle, ctx(`/api/universities?limit=2&offset=${offset}`));
+    assert.equal(res.status, 200);
+    assert.equal(res.body.total, 11);
+    pages.push(res.body.items.map((u) => u.code));
+  }
+  assert.deepEqual(pages.map((p) => p.length), [2, 2, 2, 2, 2, 1]);
+  const seen = pages.flat();
+  assert.equal(new Set(seen).size, 11, '各页无重叠');
+  assert.deepEqual([...seen].sort(), LIST_SCHOOLS.map((s) => s.code).sort(), '分页合起来是全部');
+  // 每页按名称升序（与 majors 列表同一排序口径）。
+  const first = await call(handle, ctx('/api/universities?limit=11'));
+  const names = first.body.items.map((u) => u.name);
+  assert.deepEqual(names, [...names].sort((a, b) => a.localeCompare(b, 'zh')));
+  // offset 越界返回空页，总数不变。
+  const beyond = await call(handle, ctx('/api/universities?limit=2&offset=20'));
+  assert.equal(beyond.status, 200);
+  assert.equal(beyond.body.total, 11);
+  assert.deepEqual(beyond.body.items, []);
+  // 默认 limit 20：25 所只返回前 20；limit=100 可取全。
+  const many = Array.from({ length: 25 }, (_, i) => ({
+    code: `9${String(i).padStart(4, '0')}`, name: `测试院校${String(i).padStart(2, '0')}`,
+    province: '北京', city: null, type: '综合', level: '本科', tags: '公办', website: null, source: UNI_SOURCE, note: null,
+  }));
+  const f2 = fixture();
+  await seedListSchools(f2.db, many);
+  const def = await call(f2.handle, ctx('/api/universities'));
+  assert.equal(def.body.total, 25);
+  assert.equal(def.body.items.length, 20);
+  const maxed = await call(f2.handle, ctx('/api/universities?limit=100'));
+  assert.equal(maxed.body.items.length, 25);
+});
+
+test('模块5：高校列表非法参数返回 400、不 500', async () => {
+  const { db, handle } = fixture();
+  await seedListSchools(db);
+  const cases = [
+    '/api/universities?limit=0',
+    '/api/universities?limit=101',
+    '/api/universities?limit=abc',
+    '/api/universities?limit=1.5',
+    '/api/universities?offset=-1',
+    '/api/universities?offset=1.5',
+    '/api/universities?province=火星',
+    '/api/universities?type=不存在',
+    '/api/universities?level=博士',
+    '/api/universities?tag=不存在',
+    `/api/universities?q=${'学'.repeat(51)}`,
+  ];
+  for (const path of cases) {
+    const res = await call(handle, ctx(path));
+    assert.equal(res.status, 400, path);
+    assert.equal(res.body.error, 'invalid_filter', path);
+  }
+  // 边界合法值仍 200：limit=1、limit=100、offset=0。
+  for (const path of ['/api/universities?limit=1', '/api/universities?limit=100', '/api/universities?offset=0']) {
+    assert.equal((await call(handle, ctx(path))).status, 200, path);
+  }
 });
 
 test('模块5：按高考省份查询详情，省份条件先于截断，默认计划年份取该省实际数据', async () => {
@@ -1456,12 +1582,15 @@ test('模块5：元数据需管理员且形状受校验', async () => {
 });
 
 test('模块5：大院校索引元数据（>8KB）可保存并回读', async () => {
-  const { handle, cookie } = await adminFixture();
+  const { handle, cookie, db } = await adminFixture();
   const index = Array.from({ length: 300 }, (_, i) => ({ code: `C${i}`, name: `示例院校名称较长用于超出默认正文上限${i}` }));
   const saved = await postMeta(handle, cookie, { key: 'universities_index', value: index });
   assert.equal(saved.status, 200, '院校索引不受默认 8KB 正文上限限制');
+  const stored = JSON.parse(db.dump('data_meta').find((r) => r.key === 'universities_index').value);
+  assert.equal(stored.length, 300, '超大索引完整落库');
   const list = await call(handle, ctx('/api/universities'));
-  assert.equal(list.body.universities.length, 300);
+  assert.equal(list.status, 200);
+  assert.equal(list.body.total, 0, '列表读 universities 表，索引元数据不再作为列表源');
 });
 
 test('模块5：写入被拒不回退；响应丢失经确定性主键恢复不重复', async () => {
@@ -1483,7 +1612,7 @@ test('模块5：写入被拒不回退；响应丢失经确定性主键恢复不�
 });
 
 test('模块5：多省增量导入元数据合并（索引/筛选面并集、计数服务端累加且幂等）', async () => {
-  const { handle, cookie } = await adminFixture();
+  const { handle, cookie, db } = await adminFixture();
   // 河南批次
   await postImport(handle, cookie, chunk('universities', [UNIVERSITY_ROW]));
   await postImport(handle, cookie, chunk('admission_scores', [{ ...SCORE_ROW, category: '理科' }]));
@@ -1500,7 +1629,9 @@ test('模块5：多省增量导入元数据合并（索引/筛选面并集、计
   await postMeta(handle, cookie, { key: 'plan_facets', value: { provinces: ['河北'], years: [2026], batches: ['本科批'] } });
 
   const list = await call(handle, ctx('/api/universities'));
-  assert.equal(list.body.universities.length, 2, '院校索引为两省并集，不被新文件覆盖');
+  assert.equal(list.body.total, 2, '两省导入后院校表共 2 所');
+  const storedIndex = JSON.parse(db.dump('data_meta').find((r) => r.key === 'universities_index').value);
+  assert.deepEqual(storedIndex.map((u) => u.code).sort(), ['10001', '10003'], '院校索引为两省并集，不被新文件覆盖');
   assert.deepEqual(list.body.score_facets.provinces, ['河北', '河南']);
   assert.deepEqual(list.body.score_facets.years, [2025, 2026]);
   assert.deepEqual(list.body.score_facets.categories, ['物理类', '理科']);

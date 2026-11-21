@@ -89,14 +89,23 @@ export function errorMessage(error: unknown): string {
 }
 
 // ===== 模块5：高校与录取数据 =====
-export type UniversityIndexItem = { code: string; name: string };
 export type Facets = { provinces?: string[]; years?: number[]; categories?: string[]; batches?: string[] };
 export type Counts = { universities: number; admission_scores: number; enrollment_plans: number };
 export type UniversitiesResponse = {
-  universities: UniversityIndexItem[];
+  total: number;
+  items: University[];
   score_facets: Facets;
   plan_facets: Facets;
   counts: Counts;
+};
+export type UniversityFilters = {
+  q?: string;
+  province?: string;
+  type?: string;
+  level?: string;
+  tag?: string;
+  limit?: number;
+  offset?: number;
 };
 export type University = {
   code: string; name: string; province: string | null; city: string | null;
@@ -120,7 +129,18 @@ export type UniversityDetail = {
   plan_year: number | null; plan_years: number[];
 };
 
-export const getUniversities = () => api<UniversitiesResponse>("/api/universities");
+export const getUniversities = (filters: UniversityFilters = {}) => {
+  const params = new URLSearchParams();
+  if (filters.q) params.set("q", filters.q);
+  if (filters.province) params.set("province", filters.province);
+  if (filters.type) params.set("type", filters.type);
+  if (filters.level) params.set("level", filters.level);
+  if (filters.tag) params.set("tag", filters.tag);
+  if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+  if (filters.offset !== undefined) params.set("offset", String(filters.offset));
+  const query = params.toString();
+  return api<UniversitiesResponse>(`/api/universities${query ? `?${query}` : ""}`);
+};
 export const getUniversityDetail = (code: string, year?: number, province?: string) => {
   const params = new URLSearchParams();
   if (year !== undefined) params.set("year", String(year));

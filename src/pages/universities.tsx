@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft, Building2, Search } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -37,7 +37,7 @@ export default function UniversitiesPage({ code }: { code?: string }) {
     let cancelled = false;
     setLoading(true);
     setError("");
-    getUniversities()
+    getUniversities({ limit: 1 })
       .then((result) => { if (!cancelled) setData(result); })
       .catch((err) => { if (!cancelled) setError(errorMessage(err)); })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -89,27 +89,53 @@ export default function UniversitiesPage({ code }: { code?: string }) {
           {!province && provinces.length > 0 && <p className="py-8 text-center text-sm text-muted-foreground">请先选择高考省份，再查找高校。</p>}
           {province && (code
             ? <DetailView key={`${province}:${code}`} code={code} province={province} />
-            : <ListView key={province} data={data} province={province} />)}
+            : <ListView key={province} province={province} />)}
         </>
       )}
     </div>
   );
 }
 
-function ListView({ data, province }: { data: UniversitiesResponse; province: string }) {
+function ListView({ province }: { province: string }) {
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [page, setPage] = useState(0);
+  const [data, setData] = useState<UniversitiesResponse | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [retry, setRetry] = useState(0);
 
-  const filtered = useMemo(() => {
-    const list = data?.universities ?? [];
-    const q = query.trim().toLowerCase();
-    if (!q) return list;
-    return list.filter((u) => u.name.toLowerCase().includes(q) || u.code.toLowerCase().includes(q));
-  }, [data, query]);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [query]);
 
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  useEffect(() => {
+    setPage(0);
+  }, [debouncedQuery]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    getUniversities({ q: debouncedQuery || undefined, limit: PAGE_SIZE, offset: page * PAGE_SIZE })
+      .then((result) => { if (!cancelled) setData(result); })
+      .catch((err) => { if (!cancelled) setError(errorMessage(err)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [province, debouncedQuery, page, retry]);
+
+  const total = data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const current = Math.min(page, pageCount - 1);
-  const visible = filtered.slice(current * PAGE_SIZE, current * PAGE_SIZE + PAGE_SIZE);
+  const visible = data?.items ?? [];
+
+  // 查询结果缩水导致当前页越界时退回最后一页（查询变化时上面已重置为第 1 页）。
+  useEffect(() => {
+    if (data && page > 0 && page * PAGE_SIZE >= data.total) {
+      setPage(Math.max(0, pageCount - 1));
+    }
+  }, [data, page, pageCount]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -118,7 +144,15 @@ function ListView({ data, province }: { data: UniversitiesResponse; province: st
         <p className="text-sm text-muted-foreground">下方为全站已收录院校名录；所选省份未收录该校数据时，详情会显示「暂无数据」。</p>
       </div>
 
-      {data.universities.length === 0 && (
+      {loading && !data && <p role="status" className="py-12 text-center text-sm text-muted-foreground">正在加载院校数据…</p>}
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription className="flex flex-wrap items-center gap-3">
+            {error}<Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>重试加载</Button>
+          </AlertDescription>
+        </Alert>
+      )}
+      {data && data.counts.universities === 0 && (
         <Card>
           <CardHeader>
             <CardTitle>暂无院校数据</CardTitle>
@@ -129,9 +163,9 @@ function ListView({ data, province }: { data: UniversitiesResponse; province: st
         </Card>
       )}
 
-      {data.universities.length > 0 && (
+      {data && data.counts.universities > 0 && (
         <>
-          <p className="text-sm text-muted-foreground">院校名录共 {data.universities.length} 所 · 当前匹配 {filtered.length} 所</p>
+          <p className="text-sm text-muted-foreground">院校名录共 {data.counts.universities} 所 · 当前匹配 {data.total} 所{loading ? " · 加载中…" : ""}</p>
 
           <div className="relative max-w-md">
             <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
@@ -139,7 +173,7 @@ function ListView({ data, province }: { data: UniversitiesResponse; province: st
               className="pl-9"
               placeholder="搜索学校名称或院校代码"
               value={query}
-              onChange={(e) => { setQuery(e.target.value); setPage(0); }}
+              onChange={(e) => setQuery(e.target.value)}
               aria-label="搜索院校"
             />
           </div>
@@ -368,11 +402,8 @@ function ScoreTable({ rows }: { rows: ScoreRow[] }) {
               <td className="px-2 py-2">{nd(s.min_rank)}</td>
               <td className="px-2 py-2">{nd(s.admitted_count)}</td>
               <td className="px-2 py-2">
-                <details>
-                  <summary className="cursor-pointer text-xs text-primary">查看</summary>
-                  <p className="mt-1 max-w-xs text-xs text-muted-foreground">{nd(s.note)}</p>
-                  <p className="mt-1 max-w-xs text-xs text-muted-foreground">来源：{s.source}</p>
-                </details>
+                <p className="max-w-xs text-xs text-muted-foreground">{nd(s.note)}</p>
+                <p className="mt-1 max-w-xs text-xs text-muted-foreground">来源：{s.source}</p>
               </td>
             </tr>
           ))}
@@ -410,11 +441,8 @@ function PlanTable({ rows }: { rows: UniversityDetail["plans"] }) {
               <td className="px-2 py-2">{nd(p.plan_count)}</td>
               <td className="px-2 py-2">{nd(p.tuition)}</td>
               <td className="px-2 py-2">
-                <details>
-                  <summary className="cursor-pointer text-xs text-primary">查看</summary>
-                  <p className="mt-1 max-w-xs text-xs text-muted-foreground">{nd(p.note)}</p>
-                  <p className="mt-1 max-w-xs text-xs text-muted-foreground">来源：{p.source}</p>
-                </details>
+                <p className="max-w-xs text-xs text-muted-foreground">{nd(p.note)}</p>
+                <p className="mt-1 max-w-xs text-xs text-muted-foreground">来源：{p.source}</p>
               </td>
             </tr>
           ))}
