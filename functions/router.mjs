@@ -24,6 +24,7 @@ import { hashPassword, verifyPassword, verifyPasswordAgainstDummy } from './pass
 import { SESSION_TTL_MS, clearSessionCookie, createSession, revokeSession, sessionCookie, validateSession } from './sessions.mjs';
 import { consume } from './limiter.mjs';
 import { createWrongQuestion, deleteWrongQuestion, getWrongQuestion, listWrongQuestions, reviewWrongQuestion, updateWrongQuestion, wrongQuestionStats } from './wrong-questions.mjs';
+import { completeStudyTask, createStudyTask, deleteStudyTask, getStudyTask, listStudyTasks, updateStudyTask } from './study-tasks.mjs';
 
 const SESSION_TTL_SECONDS = Math.floor(SESSION_TTL_MS / 1000);
 const encoder = new TextEncoder();
@@ -713,6 +714,26 @@ async function route(db, request, origin, storage) {
       if (request.method === 'GET') return getWrongQuestion(db, session, match[1]);
       if (request.method === 'PATCH') return updateWrongQuestion(db, request, session, match[1]);
       if (request.method === 'DELETE') return deleteWrongQuestion(db, session, match[1]);
+    }
+    throw new AppError('method_not_allowed', 405);
+  }
+
+  // 模块9：任务同步到账号（普通任务；未登录一律 401，归属只认会话）。
+  if (path === '/api/study-tasks' || path.startsWith('/api/study-tasks/')) {
+    const session = await requireSession(db, request);
+    if (path === '/api/study-tasks') {
+      if (request.method === 'GET') return listStudyTasks(db, request, session);
+      if (request.method === 'POST') return createStudyTask(db, request, session);
+      throw new AppError('method_not_allowed', 405);
+    }
+    const match = path.match(/^\/api\/study-tasks\/([^/]+)(\/complete)?$/);
+    if (!match) throw new AppError('not_found', 404);
+    if (match[2]) {
+      if (request.method === 'POST') return completeStudyTask(db, session, match[1]);
+    } else {
+      if (request.method === 'GET') return getStudyTask(db, session, match[1]);
+      if (request.method === 'PATCH') return updateStudyTask(db, request, session, match[1]);
+      if (request.method === 'DELETE') return deleteStudyTask(db, session, match[1]);
     }
     throw new AppError('method_not_allowed', 405);
   }

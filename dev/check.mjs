@@ -457,6 +457,203 @@ test('院校对比：最新一年分数全部无法解析时最低分为空并�
   assert.equal(a.score.invalid_rows, 2);
 });
 
+// ---- 模块9：任务同步到账号（普通任务） ----
+
+const TASK = { title: '本地测试任务：背 20 个单词', subject: '英语', due_date: '2026-11-25' };
+const tasksPath = '/api/study-tasks';
+const newTask = (handle, cookie, extra = {}) => call(handle, ctx(tasksPath, { method: 'POST', cookie, body: { ...TASK, ...extra } }));
+
+test('模块9：所有任务接口均需会话，未登录写操作401，CSRF不放行', async () => {
+  const { handle, db } = fixture();
+  const id = crypto.randomUUID();
+  for (const [path, method] of [[tasksPath, 'GET'], [tasksPath, 'POST'], [`${tasksPath}/${id}`, 'GET'], [`${tasksPath}/${id}`, 'PATCH'], [`${tasksPath}/${id}`, 'DELETE'], [`${tasksPath}/${id}/complete`, 'POST']]) {
+    assert.equal((await call(handle, ctx(path, { method, ...(['POST', 'PATCH'].includes(method) ? { body: TASK } : {}) }))).status, 401);
+  }
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const created = await newTask(handle, cookie);
+  for (const [path, method] of [[tasksPath, 'POST'], [`${tasksPath}/${created.body.item.id}`, 'PATCH'], [`${tasksPath}/${created.body.item.id}`, 'DELETE'], [`${tasksPath}/${created.body.item.id}/complete`, 'POST']]) {
+    assert.equal((await call(handle, ctx(path, { method, cookie, origin: 'https://evil.test', ...(method === 'DELETE' ? {} : { body: TASK }) }))).status, 403);
+  }
+  assert.equal(db.dump('study_tasks').length, 1);
+  assert.equal((await call(handle, ctx(tasksPath, { method: 'PUT', cookie, body: {} }))).status, 405);
+  assert.equal((await call(handle, ctx(`${tasksPath}/${created.body.item.id}/complete`, { cookie }))).status, 405);
+});
+
+test('模块9：归属只认会话，A/B详情修改删除完成隔离', async () => {
+  const { handle, db } = fixture();
+  const a = await register(handle, uniqueName()), b = await register(handle, uniqueName());
+  const ca = cookiePair(a), cb = cookiePair(b);
+  const created = await newTask(handle, ca, { user_id: b.body.user.id, owner_id: b.body.user.id, done: true, done_at: '2026-01-01T00:00:00.000Z' });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.user_id, a.body.user.id);
+  assert.equal(created.body.item.user_id, a.body.user.id);
+  assert.equal(created.body.item.done, false);
+  assert.equal(created.body.item.done_at, null);
+  assert.equal(created.body.item.kind, 'normal');
+  const path = `${tasksPath}/${created.body.item.id}`;
+  for (const [target, method, body] of [[path, 'GET'], [path, 'PATCH', { title: '篡改' }], [path, 'DELETE'], [`${path}/complete`, 'POST']]) {
+    assert.equal((await call(handle, ctx(target, { cookie: cb, method, body }))).status, 404);
+  }
+  assert.equal((await call(handle, ctx(`${tasksPath}?user_id=${a.body.user.id}`, { cookie: cb }))).body.total, 0);
+  assert.equal(db.dump('study_tasks')[0].title, TASK.title);
+  assert.equal((await call(handle, ctx(path, { cookie: ca }))).status, 200);
+});
+
+test('模块9：提交时账号一致性前置条件，跨标签页换号不可写入旧账号草稿', async () => {
+  const { handle, db } = fixture();
+  const a = await register(handle, uniqueName()), b = await register(handle, uniqueName());
+  const ca = cookiePair(a), cb = cookiePair(b);
+  const changed = await newTask(handle, cb, { expected_user_id: a.body.user.id, user_id: a.body.user.id });
+  assert.equal(changed.status, 409);
+  assert.equal(changed.body.error, 'study_task_session_changed');
+  assert.equal(db.dump('study_tasks').length, 0);
+  const valid = await newTask(handle, cb, { expected_user_id: b.body.user.id, user_id: a.body.user.id });
+  assert.equal(valid.status, 201);
+  assert.equal(valid.body.item.user_id, b.body.user.id);
+});
+
+test('模块9：字段长度、对象形状、学科/kind/截止日期白名单', async () => {
+  const { handle } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  for (const extra of [{ title: '' }, { title: ' '.repeat(3) }, { title: null }, { title: '题'.repeat(101) }, { subject: '体育' }, { kind: 'review' }, { kind: '' }, { due_date: '2026-13-01' }, { due_date: '2026-02-30' }, { due_date: '11/25/2026' }, { due_date: 20261125 }]) {
+    assert.equal((await newTask(handle, cookie, extra)).status, 400, JSON.stringify(Object.keys(extra)));
+  }
+  for (const body of [null, [], 'text']) assert.equal((await call(handle, ctx(tasksPath, { method: 'POST', cookie, body }))).status, 400);
+  const other = await newTask(handle, cookie, { subject: '其他', due_date: '' });
+  assert.equal(other.status, 201);
+  assert.equal(other.body.item.subject, '其他');
+  assert.equal(other.body.item.due_date, null);
+  const created = await newTask(handle, cookie, { subject: null, due_date: null });
+  const path = `${tasksPath}/${created.body.item.id}`;
+  for (const body of [{ title: '' }, { done: 'yes' }, { kind: 'review' }, { due_date: 'bad' }, { user_id: crypto.randomUUID() }, { done_at: '2026-01-01T00:00:00.000Z' }, {}, []]) {
+    assert.equal((await call(handle, ctx(path, { method: 'PATCH', cookie, body }))).status, 400);
+  }
+  const updated = await call(handle, ctx(path, { method: 'PATCH', cookie, body: { title: '改后标题', due_date: '2026-12-01', subject: '英语' } }));
+  assert.equal(updated.status, 200);
+  assert.equal(updated.body.item.title, '改后标题');
+  assert.equal(updated.body.item.due_date, '2026-12-01');
+  assert.equal(updated.body.item.subject, '英语');
+  assert.equal((await call(handle, ctx(`${tasksPath}/bad-id`, { cookie }))).status, 404);
+  const oversized = await newTask(handle, cookie, { title: 'x'.repeat(70000) });
+  assert.equal(oversized.status, 413);
+});
+
+test('模块9：列表按截止日期排序、空日期在最后、分页与真实总数', async () => {
+  const { handle, db } = fixture();
+  const a = await register(handle, uniqueName()), b = await register(handle, uniqueName());
+  const cookie = cookiePair(a);
+  const rows = [];
+  const mk = (i, due) => ({ id: crypto.randomUUID(), user_id: a.body.user.id, title: `任务${i}`, subject: '数学', kind: 'normal', due_date: due, done: false, done_at: null, created_at: `2026-11-21T00:00:${String(i).padStart(2, '0')}.000Z` });
+  for (let i = 0; i < 10; i++) rows.push(mk(i, '2026-11-25'));
+  for (let i = 10; i < 20; i++) rows.push(mk(i, '2026-11-20'));
+  for (let i = 20; i < 25; i++) rows.push(mk(i, null));
+  await db.from('study_tasks').insertIfAbsent(rows, { onConflict: 'id' });
+  await newTask(handle, cookiePair(b));
+  const first = await call(handle, ctx(`${tasksPath}?limit=20&offset=0`, { cookie }));
+  const second = await call(handle, ctx(`${tasksPath}?limit=20&offset=20`, { cookie }));
+  assert.equal(first.body.total, 25);
+  assert.equal(first.body.items.length, 20);
+  assert.equal(second.body.items.length, 5);
+  assert.equal(new Set([...first.body.items, ...second.body.items].map((r) => r.id)).size, 25);
+  assert.ok(first.body.items.every((r) => r.due_date !== null));
+  assert.ok(second.body.items.every((r) => r.due_date === null));
+  const due20 = first.body.items.filter((r) => r.due_date === '2026-11-20');
+  const due25 = first.body.items.filter((r) => r.due_date === '2026-11-25');
+  assert.equal(due20.length, 10);
+  assert.equal(due25.length, 10);
+  assert.deepEqual(due20.map((r) => r.id), rows.slice(10, 20).reverse().map((r) => r.id));
+  assert.deepEqual(due25.map((r) => r.id), rows.slice(0, 10).reverse().map((r) => r.id));
+  const end = await call(handle, ctx(`${tasksPath}?offset=1000`, { cookie }));
+  assert.equal(end.body.total, 25);
+  assert.equal(end.body.items.length, 0);
+  for (const query of ['limit=0', 'limit=101', 'offset=-1', 'offset=NaN', 'offset=1.5', 'offset=9007199254740992']) {
+    assert.equal((await call(handle, ctx(`${tasksPath}?${query}`, { cookie }))).status, 400, query);
+  }
+});
+
+test('模块9：完成切换写 done_at，取消完成清空，complete 幂等', async () => {
+  const { handle, db } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const created = await newTask(handle, cookie);
+  const path = `${tasksPath}/${created.body.item.id}`;
+  const done = await call(handle, ctx(`${path}/complete`, { method: 'POST', cookie }));
+  assert.equal(done.status, 200);
+  assert.equal(done.body.item.done, true);
+  assert.ok(Number.isFinite(Date.parse(done.body.item.done_at)));
+  const doneAt = done.body.item.done_at;
+  const again = await call(handle, ctx(`${path}/complete`, { method: 'POST', cookie }));
+  assert.equal(again.status, 200);
+  assert.equal(again.body.item.done_at, doneAt, '重复完成不改 done_at');
+  const undone = await call(handle, ctx(path, { method: 'PATCH', cookie, body: { done: false } }));
+  assert.equal(undone.status, 200);
+  assert.equal(undone.body.item.done, false);
+  assert.equal(undone.body.item.done_at, null);
+  const redone = await call(handle, ctx(path, { method: 'PATCH', cookie, body: { done: true } }));
+  assert.equal(redone.status, 200);
+  assert.equal(redone.body.item.done, true);
+  assert.ok(Number.isFinite(Date.parse(redone.body.item.done_at)));
+  assert.equal(db.dump('study_tasks')[0].done, true);
+});
+
+test('模块9：删除真实移除记录，其他用户不能删除', async () => {
+  const { handle, db } = fixture();
+  const a = await register(handle, uniqueName()), b = await register(handle, uniqueName());
+  const ca = cookiePair(a), cb = cookiePair(b);
+  const created = await newTask(handle, ca);
+  const path = `${tasksPath}/${created.body.item.id}`;
+  assert.equal((await call(handle, ctx(path, { method: 'DELETE', cookie: cb }))).status, 404);
+  assert.equal((await call(handle, ctx(path, { method: 'DELETE', cookie: ca }))).status, 200);
+  assert.equal(db.dump('study_tasks').length, 0);
+  assert.equal((await call(handle, ctx(path, { cookie: ca }))).status, 404);
+  assert.equal((await call(handle, ctx(path, { method: 'DELETE', cookie: ca }))).status, 404);
+});
+
+test('模块9：创建修改完成删除的响应丢失不重放，明确拒绝不落库', async () => {
+  const { handle, db, control } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  const countWrites = () => control.writes.filter((table) => table === 'study_tasks').length;
+  control.dropTable = 'study_tasks';
+  const beforeCreate = countWrites();
+  assert.equal((await newTask(handle, cookie)).body.error, 'study_task_unconfirmed');
+  assert.equal(countWrites() - beforeCreate, 1);
+  assert.equal(db.dump('study_tasks').length, 1);
+  const path = `${tasksPath}/${db.dump('study_tasks')[0].id}`;
+  for (const [target, method, body] of [[path, 'PATCH', { title: '改' }], [`${path}/complete`, 'POST'], [path, 'DELETE']]) {
+    control.dropTable = 'study_tasks';
+    const before = countWrites();
+    const response = await call(handle, ctx(target, { cookie, method, body }));
+    assert.equal(response.status, 503);
+    assert.equal(response.body.error, 'study_task_unconfirmed');
+    assert.equal(countWrites() - before, 1);
+  }
+  assert.equal(db.dump('study_tasks').length, 0);
+  control.rejectTable = 'study_tasks';
+  assert.equal((await newTask(handle, cookie)).status, 503);
+  assert.equal(db.dump('study_tasks').length, 0);
+});
+
+test('模块9：计数缺失或数据库失败不可伪装为零', async () => {
+  const { handle, db } = fixture();
+  const cookie = cookiePair(await register(handle, uniqueName()));
+  for (const fail of [false, true]) {
+    const wrapped = { from(table) {
+      const source = db.from(table);
+      if (table !== 'study_tasks') return source;
+      return { ...source, select(...args) {
+        const query = source.select(...args);
+        const originalThen = query.then.bind(query);
+        query.then = (resolve, reject) => originalThen((result) => resolve(fail ? { error: { code: 'missing_table' } } : { ...result, count: null }), reject);
+        return query;
+      } };
+    } };
+    const broken = createApplication({ db: wrapped, origin: PUBLIC_ORIGIN });
+    const result = await call(broken, ctx(tasksPath, { cookie }));
+    assert.equal(result.status, 503);
+    assert.equal(result.body.error, 'database_unavailable');
+    assert.equal(result.body.total, undefined);
+  }
+});
+
 const WRONG_QUESTION = {
   subject: '数学', grade: '高二', chapter: '函数', source: '练习',
   question: '本地测试题：2 + 3 = ?', correct_answer: '5', my_answer: '4', reason: '计算失误', note: '本地合成测试数据',

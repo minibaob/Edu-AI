@@ -1,7 +1,8 @@
 // 首页 / 学习仪表盘：统计数字来自后端 /api/stats 的真实计数（资料总数、
 // 高校收录、登录后的收藏与测评数），空数据如实显示「暂无数据」，不再展示
-// 演示数字。今日任务保存在本机浏览器（localStorage），首次访问以示例任务
-// 起步。个性化推荐来自 /api/recommendations 的真实数据（规则匹配，无 AI）。
+// 演示数字。今日任务登录后同步到账号（/api/study-tasks），未登录时保存在
+// 本机浏览器（localStorage），首次访问以示例任务起步。个性化推荐来自
+// /api/recommendations 的真实数据（规则匹配，无 AI）。
 import { useEffect, useState } from "react";
 import {
   ArrowRight,
@@ -29,6 +30,8 @@ import { fetchStats } from "@/src/lib/stats";
 import type { HomeStats } from "@/src/lib/stats";
 import { fetchRecommendations } from "@/src/lib/recommendations";
 import type { Recommendation } from "@/src/lib/recommendations";
+import { studyTasksClient } from "@/src/lib/study-tasks";
+import type { StudyTask } from "@/src/lib/study-tasks";
 import { cn } from "@/lib/utils";
 
 function greeting(): string {
@@ -52,7 +55,7 @@ const QUICK_ENTRIES = [
 
 const TASK_SUBJECTS = ["语文", "数学", "英语", "物理", "化学", "生物", "历史", "地理", "政治", "其他"];
 
-type Task = { id: string; text: string; subject: string; done: boolean };
+type Task = { id: string; text: string; subject: string; done: boolean; due_date: string | null };
 
 const TASKS_KEY = "eduai:home:tasks";
 
@@ -61,12 +64,24 @@ function loadTasks(): Task[] {
     const raw = localStorage.getItem(TASKS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Task[];
-      if (Array.isArray(parsed)) return parsed;
+      if (Array.isArray(parsed)) return parsed.map((t) => ({ ...t, due_date: t.due_date ?? null }));
     }
   } catch {
     // 本机存储不可用时用示例任务起步，不阻塞页面。
   }
-  return DEMO_TASKS.map((t) => ({ ...t }));
+  return DEMO_TASKS.map((t) => ({ ...t, due_date: null }));
+}
+
+function toLocalTask(item: StudyTask): Task {
+  return { id: item.id, text: item.title, subject: item.subject ?? "其他", done: item.done, due_date: item.due_date };
+}
+
+function todayLocal(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 function statValue(value: number | null, unit: string, emptyText: string): string {
@@ -81,8 +96,12 @@ export default function HomePage() {
   const [recs, setRecs] = useState<Recommendation[] | null>(null);
   const [recsError, setRecsError] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks());
+  const [tasksMode, setTasksMode] = useState<"local" | "server">("local");
+  const [tasksError, setTasksError] = useState<string | null>(null);
+  const [tasksLoading, setTasksLoading] = useState(false);
   const [newTaskText, setNewTaskText] = useState("");
   const [newTaskSubject, setNewTaskSubject] = useState(TASK_SUBJECTS[1]);
+  const [newTaskDueDate, setNewTaskDueDate] = useState("");
   const doneCount = tasks.filter((t) => t.done).length;
 
   useEffect(() => {
@@ -116,22 +135,106 @@ export default function HomePage() {
     };
   }, [user?.id, loading]);
 
+  // 登录后任务走账号同步：本机列表不再写入 localStorage（退出、换号后
+  // 回到本机列表时，本地任务原样保留，不被账号任务覆盖）。
   useEffect(() => {
+    if (tasksMode !== "local") return;
     try {
       localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
     } catch {
       // 本机存储不可用时忽略，任务仍可在本次会话中使用。
     }
-  }, [tasks]);
+  }, [tasks, tasksMode]);
 
-  function addTask() {
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    if (!user) {
+      setTasks(loadTasks());
+      setTasksMode("local");
+      setTasksError(null);
+      return;
+    }
+    setTasksLoading(true);
+    studyTasksClient
+      .list(user.id, { limit: 100 })
+      .then((data) => {
+        if (cancelled) return;
+        setTasks(data.items.map(toLocalTask));
+        setTasksMode("server");
+        setTasksError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setTasks([]);
+        setTasksMode("server");
+        setTasksError(errorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setTasksLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, loading]);
+
+  async function addTask() {
     const text = newTaskText.trim();
     if (!text) return;
+    if (tasksMode === "server") {
+      if (!user) return;
+      try {
+        const created = await studyTasksClient.create(user.id, {
+          title: text,
+          subject: newTaskSubject,
+          due_date: newTaskDueDate || null,
+        });
+        setTasks((prev) => [...prev, toLocalTask(created.item)]);
+        setTasksError(null);
+        setNewTaskText("");
+        setNewTaskDueDate("");
+      } catch (err) {
+        setTasksError(errorMessage(err));
+      }
+      return;
+    }
     setTasks((prev) => [
       ...prev,
-      { id: `t-${Date.now()}`, text, subject: newTaskSubject, done: false },
+      { id: `t-${Date.now()}`, text, subject: newTaskSubject, done: false, due_date: newTaskDueDate || null },
     ]);
     setNewTaskText("");
+    setNewTaskDueDate("");
+  }
+
+  async function toggleTask(task: Task) {
+    if (tasksMode === "server") {
+      if (!user) return;
+      try {
+        const result = task.done
+          ? await studyTasksClient.patch(user.id, task.id, { done: false })
+          : await studyTasksClient.complete(user.id, task.id);
+        setTasks((prev) => prev.map((t) => (t.id === task.id ? toLocalTask(result.item) : t)));
+        setTasksError(null);
+      } catch (err) {
+        setTasksError(errorMessage(err));
+      }
+      return;
+    }
+    setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, done: !t.done } : t)));
+  }
+
+  async function deleteTask(task: Task) {
+    if (tasksMode === "server") {
+      try {
+        await studyTasksClient.remove(task.id);
+        setTasks((prev) => prev.filter((t) => t.id !== task.id));
+        setTasksError(null);
+      } catch (err) {
+        setTasksError(errorMessage(err));
+      }
+      return;
+    }
+    setTasks((prev) => prev.filter((t) => t.id !== task.id));
   }
 
   const statCards = [
@@ -242,7 +345,11 @@ export default function HomePage() {
               </span>
             </CardHeader>
             <CardContent className="flex flex-col gap-1">
-              {tasks.length === 0 ? (
+              {tasksLoading ? (
+                <p className="px-2 py-3 text-sm text-muted-foreground">
+                  正在同步账号任务…
+                </p>
+              ) : tasks.length === 0 ? (
                 <p className="px-2 py-3 text-sm text-muted-foreground">
                   还没有任务，在下方添加一个吧。
                 </p>
@@ -254,11 +361,7 @@ export default function HomePage() {
                   >
                     <button
                       type="button"
-                      onClick={() =>
-                        setTasks((prev) =>
-                          prev.map((t) => (t.id === task.id ? { ...t, done: !t.done } : t))
-                        )
-                      }
+                      onClick={() => toggleTask(task)}
                       className="flex flex-1 items-center gap-3 text-left"
                       aria-pressed={task.done}
                       aria-label={task.done ? `标记「${task.text}」为未完成` : `标记「${task.text}」为已完成`}
@@ -278,9 +381,22 @@ export default function HomePage() {
                       </span>
                     </button>
                     <Badge variant="secondary" className="shrink-0">{task.subject}</Badge>
+                    {task.due_date && (
+                      <span
+                        className={cn(
+                          "shrink-0 text-xs",
+                          !task.done && task.due_date < todayLocal()
+                            ? "font-medium text-destructive"
+                            : "text-muted-foreground"
+                        )}
+                      >
+                        {task.due_date}
+                        {!task.done && task.due_date < todayLocal() ? " 已过期" : ""}
+                      </span>
+                    )}
                     <button
                       type="button"
-                      onClick={() => setTasks((prev) => prev.filter((t) => t.id !== task.id))}
+                      onClick={() => deleteTask(task)}
                       className="shrink-0 rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                       aria-label={`删除任务「${task.text}」`}
                     >
@@ -311,14 +427,26 @@ export default function HomePage() {
                       <option key={s} value={s}>{s}</option>
                     ))}
                   </select>
+                  <input
+                    type="date"
+                    value={newTaskDueDate}
+                    onChange={(e) => setNewTaskDueDate(e.target.value)}
+                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                    aria-label="任务截止日期（可选）"
+                  />
                   <Button type="button" onClick={addTask} disabled={!newTaskText.trim()}>
                     <Plus className="size-4" aria-hidden /> 添加
                   </Button>
                 </div>
               </div>
               <p className="px-2 pt-2 text-xs text-muted-foreground">
-                任务仅保存在本机浏览器，不会同步到账号；首次访问会显示几条示例任务，可直接删除或修改。
+                {tasksMode === "server"
+                  ? "已登录：任务同步到账号，换设备也能看到。"
+                  : "任务仅保存在本机浏览器，不会同步到账号；首次访问会显示几条示例任务，可直接删除或修改。"}
               </p>
+              {tasksError && (
+                <p className="px-2 pt-2 text-xs text-destructive">{tasksError}</p>
+              )}
             </CardContent>
           </Card>
         </section>
