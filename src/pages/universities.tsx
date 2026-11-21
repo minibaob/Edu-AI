@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Building2, Search } from "lucide-react";
+import { ArrowLeft, Building2, Search, X } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Link, navigate, useRoute } from "@/src/lib/router";
+import { COMPARE_MAX_SCHOOLS } from "@/src/lib/compare";
 import {
   errorMessage, getUniversities, getUniversityDetail,
 } from "@/src/lib/api";
@@ -104,6 +105,7 @@ function ListView({ province }: { province: string }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [retry, setRetry] = useState(0);
+  const [selected, setSelected] = useState<{ code: string; name: string }[]>([]);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedQuery(query.trim()), 300);
@@ -129,6 +131,18 @@ function ListView({ province }: { province: string }) {
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const current = Math.min(page, pageCount - 1);
   const visible = data?.items ?? [];
+  const selectedCodes = new Set(selected.map((item) => item.code));
+
+  function toggleCompare(university: { code: string; name: string }) {
+    setSelected((current) => current.some((item) => item.code === university.code)
+      ? current.filter((item) => item.code !== university.code)
+      : current.length >= COMPARE_MAX_SCHOOLS ? current : [...current, university]);
+  }
+
+  function goCompare() {
+    if (selected.length < 2) return;
+    navigate(`/compare?codes=${selected.map((item) => item.code).join(",")}&province=${encodeURIComponent(province)}`);
+  }
 
   // 查询结果缩水导致当前页越界时退回最后一页（查询变化时上面已重置为第 1 页）。
   useEffect(() => {
@@ -178,20 +192,58 @@ function ListView({ province }: { province: string }) {
             />
           </div>
 
+          {selected.length > 0 && (
+            <Card className="border-primary/20 bg-accent/30">
+              <CardContent className="flex flex-wrap items-center gap-3 py-3">
+                <p className="text-sm">已选 {selected.length} 所（最多 {COMPARE_MAX_SCHOOLS} 所）</p>
+                <div className="flex flex-wrap gap-1">
+                  {selected.map((item) => (
+                    <Badge key={item.code} variant="secondary" className="gap-1 py-1 pl-3 pr-1 text-sm">
+                      {item.name}
+                      <button type="button" onClick={() => toggleCompare(item)}
+                        aria-label={`移除${item.name}`} className="rounded-full p-0.5 hover:bg-accent">
+                        <X className="size-3.5" aria-hidden />
+                      </button>
+                    </Badge>
+                  ))}
+                </div>
+                <div className="ml-auto flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setSelected([])}>清空</Button>
+                  <Button size="sm" disabled={selected.length < 2} onClick={goCompare}>去对比</Button>
+                </div>
+                {selected.length < 2 && (
+                  <p className="w-full text-xs text-muted-foreground">至少选 2 所才能对比。</p>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           <Card>
             <CardContent className="p-0">
               <ul className="divide-y divide-border">
-                {visible.map((u) => (
-                  <li key={u.code}>
-                    <Link
-                      to={`/universities/${encodeURIComponent(u.code)}?province=${encodeURIComponent(province)}`}
-                      className="flex items-center justify-between gap-3 px-4 py-3 hover:bg-accent"
-                    >
-                      <span className="font-medium">{u.name}</span>
-                      <span className="shrink-0 text-xs text-muted-foreground">院校代码 {u.code}</span>
-                    </Link>
-                  </li>
-                ))}
+                {visible.map((u) => {
+                  const isSelected = selectedCodes.has(u.code);
+                  const full = selected.length >= COMPARE_MAX_SCHOOLS && !isSelected;
+                  return (
+                    <li key={u.code} className="flex items-center gap-2 px-4">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        disabled={full}
+                        onChange={() => toggleCompare(u)}
+                        aria-label={`加入对比：${u.name}`}
+                        className="size-4 shrink-0 accent-primary"
+                      />
+                      <Link
+                        to={`/universities/${encodeURIComponent(u.code)}?province=${encodeURIComponent(province)}`}
+                        className="flex flex-1 items-center justify-between gap-3 py-3 hover:bg-accent"
+                      >
+                        <span className="font-medium">{u.name}</span>
+                        <span className="shrink-0 text-xs text-muted-foreground">院校代码 {u.code}</span>
+                      </Link>
+                    </li>
+                  );
+                })}
                 {visible.length === 0 && (
                   <li className="px-4 py-8 text-center text-sm text-muted-foreground">没有匹配的院校</li>
                 )}

@@ -17,6 +17,7 @@ import {
 import { importChunk, listUniversities as listUniversitiesIndex, readMeta, universityDetail as fetchUniversityDetail, updateMeta } from './universities.mjs';
 import { listRecommendations } from './recommendations.mjs';
 import { simulateAdmissions, simulationOptions } from './simulation.mjs';
+import { compareUniversities } from './compare.mjs';
 import { FILE_MAX_BYTES, assertOwnedKey, storageKeyFor, validateUploadIntent } from './resource-files.mjs';
 import { verifyUploadedObject } from './storage-validation.mjs';
 import { hashPassword, verifyPassword, verifyPasswordAgainstDummy } from './passwords.mjs';
@@ -720,6 +721,11 @@ async function route(db, request, origin, storage) {
   if (path === '/api/universities' && request.method === 'GET') {
     return listUniversitiesIndex(db, parseUniversityQuery(new URL(request.url).search));
   }
+  // 院校对比：公开只读（2–3 所并排，最新一年分数与计划）。必须在详情路由之前，
+  // 否则 /api/universities/compare 会被详情的 code 正则匹配走。
+  if (path === '/api/universities/compare' && request.method === 'GET') {
+    return compareUniversities(db, request);
+  }
   const universityDetail = path.match(/^\/api\/universities\/([A-Za-z0-9]{1,32})$/);
   if (universityDetail && request.method === 'GET') {
     const params = new URL(request.url).searchParams;
@@ -812,7 +818,7 @@ async function route(db, request, origin, storage) {
     return updateMeta(db, request);
   }
 
-  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health', '/api/universities', '/api/majors', '/api/resources', '/api/resources/upload-url', '/api/favorites', '/api/assessments', '/api/stats', '/api/recommendations', '/api/assessment/questions', '/api/assessment/submit', '/api/assessment/latest', '/api/mbti/questions', '/api/mbti/submit', '/api/mbti/latest', '/api/admin/import', '/api/admin/meta'].includes(path)
+  if (['/api/me', '/api/profile', '/api/password', '/api/logout', '/api/register', '/api/login', '/api/health', '/api/universities', '/api/universities/compare', '/api/majors', '/api/resources', '/api/resources/upload-url', '/api/favorites', '/api/assessments', '/api/stats', '/api/recommendations', '/api/assessment/questions', '/api/assessment/submit', '/api/assessment/latest', '/api/mbti/questions', '/api/mbti/submit', '/api/mbti/latest', '/api/admin/import', '/api/admin/meta'].includes(path)
     || universityDetail || resourceDetail || resourceFileMatch || favoriteMatch) {
     throw new AppError('method_not_allowed', 405);
   }

@@ -335,6 +335,128 @@ test('模拟填报：数据库中途失败不可返回部分结果冒充总数',
   assert.equal('groups' in result.body, false);
 });
 
+// --- 院校对比 ---
+const comparePath = (query = {}) => {
+  const params = new URLSearchParams({
+    codes: 'u100,u200', province: '河北', category: '物理类', batch: '本科批', ...query,
+  });
+  return `/api/universities/compare?${params}`;
+};
+
+const seedCompare = async (db) => {
+  await db.from('universities').insertIfAbsent([
+    { code: 'u100', name: '甲大学', province: '北京', city: '北京市', type: '综合', level: '本科', tags: '双一流|985', website: 'https://a.edu.cn', source: '教育部名单' },
+    { code: 'u200', name: '乙大学', province: '上海', city: '上海市', type: '理工', level: '本科', tags: '双一流', website: 'https://b.edu.cn', source: '教育部名单' },
+    { code: 'u300', name: '丙大学', province: '河北', city: '石家庄市', type: '师范', level: '本科', tags: null, website: null, source: '教育部名单' },
+  ], { onConflict: 'code' });
+  await db.from('admission_scores').insertIfAbsent([
+    { id: 'cmp-s1', university_code: 'u100', school_name: '甲大学', province: '河北', year: 2025, category: '物理类', batch: '本科批', min_score: '640', source: '省教育考试院' },
+    { id: 'cmp-s2', university_code: 'u100', school_name: '甲大学', province: '河北', year: 2025, category: '物理类', batch: '本科批', min_score: '635', source: '省教育考试院' },
+    { id: 'cmp-s3', university_code: 'u100', school_name: '甲大学', province: '河北', year: 2024, category: '物理类', batch: '本科批', min_score: '700', source: '省教育考试院' },
+    { id: 'cmp-s4', university_code: 'u200', school_name: '乙大学', province: '河北', year: 2026, category: '物理类', batch: '本科批', min_score: '620', source: '省教育考试院' },
+    { id: 'cmp-s5', university_code: 'u200', school_name: '乙大学', province: '河北', year: 2026, category: '物理类', batch: '本科批', min_score: 'abc', source: '省教育考试院' },
+    { id: 'cmp-s6', university_code: 'u200', school_name: '乙大学', province: '河北', year: 2025, category: '物理类', batch: '本科批', min_score: '500', source: '省教育考试院' },
+  ], { onConflict: 'id' });
+  await db.from('enrollment_plans').insertIfAbsent([
+    { id: 'cmp-p1', school_name: '甲大学', province: '河北', year: 2025, major_name: '数学', batch: '本科批', plan_count: 10, source: '省教育考试院' },
+    { id: 'cmp-p2', school_name: '甲大学', province: '河北', year: 2025, major_name: '物理', batch: '本科批', plan_count: 25, source: '省教育考试院' },
+    { id: 'cmp-p3', school_name: '甲大学', province: '河北', year: 2025, major_name: '化学', batch: '本科批', plan_count: null, source: '省教育考试院' },
+    { id: 'cmp-p4', school_name: '甲大学', province: '河北', year: 2024, major_name: '数学', batch: '本科批', plan_count: 999, source: '省教育考试院' },
+    // 乙大学计划最新年 2025，与其分数最新年 2026 不同：分数与计划各标各的年份。
+    { id: 'cmp-p5', school_name: '乙大学', province: '河北', year: 2025, major_name: '计算机', batch: '本科批', plan_count: 8, source: '省教育考试院' },
+  ], { onConflict: 'id' });
+};
+
+test('院校对比：同一组合下各校取最新一年最低分与计划数，并标明年份与来源', async () => {
+  const { handle, db } = fixture();
+  await seedCompare(db);
+  const result = await call(handle, ctx(comparePath()));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.province, '河北');
+  assert.equal(result.body.category, '物理类');
+  assert.equal(result.body.batch, '本科批');
+  const [a, b] = result.body.items;
+  assert.equal(a.code, 'u100');
+  assert.equal(a.name, '甲大学');
+  assert.equal(a.found, true);
+  assert.equal(a.city, '北京市');
+  assert.equal(a.type, '综合');
+  assert.equal(a.level, '本科');
+  assert.equal(a.tags, '双一流|985');
+  // 2025 年两行取最小 635；2024 年的 700 不参与（旧年份不拼进最新年）。
+  assert.equal(a.score.min_score, 635);
+  assert.equal(a.score.year, 2025);
+  assert.equal(a.score.source, '省教育考试院');
+  assert.equal(a.score.rows, 2);
+  assert.equal(a.score.invalid_rows, 0);
+  // 计划：2025 年两行有效计划数之和 35，计划数为空的一行不计入；2024 年的 999 不参与。
+  assert.equal(a.plans.total_count, 35);
+  assert.equal(a.plans.year, 2025);
+  assert.equal(a.plans.majors, 2);
+  assert.equal(a.plans.rows, 3);
+  assert.deepEqual(a.plans.sources, ['省教育考试院']);
+  // 乙大学：最新一年 2026，最低分 620，无法解析的 'abc' 跳过并计数；计划年份独立于分数年份。
+  assert.equal(b.score.min_score, 620);
+  assert.equal(b.score.year, 2026);
+  assert.equal(b.score.rows, 2);
+  assert.equal(b.score.invalid_rows, 1);
+  assert.equal(b.plans.total_count, 8);
+  assert.equal(b.plans.year, 2025);
+});
+
+test('院校对比：缺失的分数或计划返回 null，未知代码标 found:false', async () => {
+  const { handle, db } = fixture();
+  await seedCompare(db);
+  const result = await call(handle, ctx(comparePath({ codes: 'u300,u999' })));
+  assert.equal(result.status, 200);
+  const [c, missing] = result.body.items;
+  assert.equal(c.code, 'u300');
+  assert.equal(c.found, true);
+  assert.equal(c.score, null);
+  assert.equal(c.plans, null);
+  assert.equal(missing.code, 'u999');
+  assert.equal(missing.found, false);
+  assert.equal(missing.name, null);
+  assert.equal(missing.score, null);
+  assert.equal(missing.plans, null);
+});
+
+test('院校对比：院校数量与省份科类批次校验不通过返回 400', async () => {
+  const { handle, db } = fixture();
+  await seedCompare(db);
+  const cases = [
+    { codes: 'u100' },
+    { codes: 'u100,u200,u300,u400' },
+    { codes: 'u100,u100' },
+    { province: '江苏' },
+    { category: '理科' },
+    { batch: '' },
+    { codes: '' },
+  ];
+  for (const query of cases) {
+    const result = await call(handle, ctx(comparePath(query)));
+    assert.equal(result.status, 400, JSON.stringify(query));
+    assert.equal(result.body.error, 'invalid_input');
+  }
+});
+
+test('院校对比：最新一年分数全部无法解析时最低分为空并计数', async () => {
+  const { handle, db } = fixture();
+  await db.from('universities').insertIfAbsent([{ code: 'u100', name: '甲大学', province: '北京', city: '北京市', type: '综合', level: '本科', tags: null, website: null, source: '教育部名单' }], { onConflict: 'code' });
+  await db.from('admission_scores').insertIfAbsent([
+    { id: 'cmp-x1', university_code: 'u100', school_name: '甲大学', province: '河北', year: 2026, category: '物理类', batch: '本科批', min_score: '待公布', source: '省教育考试院' },
+    { id: 'cmp-x2', university_code: 'u100', school_name: '甲大学', province: '河北', year: 2026, category: '物理类', batch: '本科批', min_score: '未公布', source: '省教育考试院' },
+    { id: 'cmp-x3', university_code: 'u100', school_name: '甲大学', province: '河北', year: 2025, category: '物理类', batch: '本科批', min_score: '600', source: '省教育考试院' },
+  ], { onConflict: 'id' });
+  const result = await call(handle, ctx(comparePath({ codes: 'u100,u200' })));
+  assert.equal(result.status, 200);
+  const [a] = result.body.items;
+  assert.equal(a.score.min_score, null);
+  assert.equal(a.score.year, 2026);
+  assert.equal(a.score.rows, 2);
+  assert.equal(a.score.invalid_rows, 2);
+});
+
 const WRONG_QUESTION = {
   subject: '数学', grade: '高二', chapter: '函数', source: '练习',
   question: '本地测试题：2 + 3 = ?', correct_answer: '5', my_answer: '4', reason: '计算失误', note: '本地合成测试数据',

@@ -5,6 +5,7 @@ import HomePage from "@/src/pages/home";
 import ResourcesPage from "@/src/pages/resources";
 import UniversitiesPage from "@/src/pages/universities";
 import SimulationPage from "@/src/pages/simulation";
+import ComparePage from "@/src/pages/compare";
 import AssessmentPage from "@/src/pages/assessment";
 import ProfilePage from "@/src/pages/profile";
 import WrongQuestionsPage from "@/src/pages/wrong-questions";
@@ -28,6 +29,9 @@ export default function App() {
         break;
       case "/simulation":
         page = <SimulationPage />;
+        break;
+      case "/compare":
+        page = <ComparePage />;
         break;
       case "/assessment":
         page = <AssessmentPage />;
