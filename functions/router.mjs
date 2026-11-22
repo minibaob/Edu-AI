@@ -80,57 +80,74 @@ async function countRows(db, table, filters = {}) {
   }
 }
 
+// 公开计数（资料总数、高校收录）与个人计数互不依赖，并行读取：
+// 此前五次读数串行往返，是首页概览加载慢的主因之一。
+// 资料总数与资料库列表同一口径——都只计 deleted_at 为空的行，
+// 列表 total 与此处 resources_total 在同一数据上一致；
+// 服务端不做跨请求缓存（计数必须如实反映当前行），前端 stats.ts
+// 另做 60 秒内存缓存，列表页始终以实时查询为准。
+async function publicStats(db) {
+  const [resources, universities] = await Promise.all([
+    (async () => {
+      try {
+        const all = rows(await db.from('resources').select('id,deleted_at').limit(COUNT_LIMIT));
+        return { total: all.filter((row) => row.deleted_at == null).length, capped: all.length === COUNT_LIMIT };
+      } catch {
+        return { total: null, capped: false };
+      }
+    })(),
+    (async () => {
+      // 院校总量只来自导入时服务端维护的 counts 元数据（精确值）；未导入时为 null。
+      try {
+        const counts = await readMeta(db, 'counts');
+        return counts && typeof counts.universities === 'number' ? counts.universities : null;
+      } catch {
+        return null;
+      }
+    })(),
+  ]);
+  return {
+    resources_total: resources.total,
+    resources_capped: resources.capped,
+    universities_total: universities,
+  };
+}
+
+async function personalStats(db, userId) {
+  const [favorites, assessmentsNew, assessmentsLegacy] = await Promise.all([
+    (async () => {
+      try {
+        // favorites 是 (user_id, resource_id) 复合主键，没有 id 列。
+        const mine = rows(await db.from('favorites').select('resource_id,revoked_at').eq('user_id', userId).limit(COUNT_LIMIT));
+        return { count: mine.filter((row) => row.revoked_at == null).length, capped: mine.length === COUNT_LIMIT };
+      } catch {
+        return { count: null, capped: false };
+      }
+    })(),
+    countRows(db, 'assessments', { user_id: userId }),
+    countRows(db, 'assessment_results', { user_id: userId }),
+  ]);
+  // 历史合并两张表（30 题/MBTI 在 assessments，24 题在 assessment_results）；
+  // 任一表不可读时总数无法确认，如实返回 null。
+  const assessmentsCount = assessmentsNew == null || assessmentsLegacy == null ? null : assessmentsNew + assessmentsLegacy;
+  return {
+    favorites_count: favorites.count,
+    favorites_capped: favorites.capped,
+    assessments_count: assessmentsCount,
+    assessments_capped: assessmentsNew === COUNT_LIMIT || assessmentsLegacy === COUNT_LIMIT,
+  };
+}
+
 async function stats(db, request) {
   const session = await validateSession(db, request);
   const userId = session.state === 'valid' ? session.session.userId : null;
-  let resourcesTotal = null;
-  let resourcesCapped = false;
-  try {
-    const all = rows(await db.from('resources').select('id,deleted_at').limit(COUNT_LIMIT));
-    resourcesCapped = all.length === COUNT_LIMIT;
-    resourcesTotal = all.filter((row) => row.deleted_at == null).length;
-  } catch {
-    resourcesTotal = null;
-  }
-  // 院校总量只来自导入时服务端维护的 counts 元数据（精确值）；未导入时为 null。
-  let universitiesTotal = null;
-  try {
-    const counts = await readMeta(db, 'counts');
-    if (counts && typeof counts.universities === 'number') universitiesTotal = counts.universities;
-  } catch {
-    universitiesTotal = null;
-  }
-  let favoritesCount = null;
-  let favoritesCapped = false;
-  let assessmentsCount = null;
-  let assessmentsCapped = false;
-  if (userId) {
-    try {
-      // favorites 是 (user_id, resource_id) 复合主键，没有 id 列。
-      const mine = rows(await db.from('favorites').select('resource_id,revoked_at').eq('user_id', userId).limit(COUNT_LIMIT));
-      favoritesCapped = mine.length === COUNT_LIMIT;
-      favoritesCount = mine.filter((row) => row.revoked_at == null).length;
-    } catch {
-      favoritesCount = null;
-    }
-    const assessmentsNew = await countRows(db, 'assessments', { user_id: userId });
-    const assessmentsLegacy = await countRows(db, 'assessment_results', { user_id: userId });
-    // 历史合并两张表（30 题/MBTI 在 assessments，24 题在 assessment_results）；
-    // 任一表不可读时总数无法确认，如实返回 null。
-    assessmentsCount = assessmentsNew == null || assessmentsLegacy == null ? null : assessmentsNew + assessmentsLegacy;
-    assessmentsCapped = assessmentsNew === COUNT_LIMIT || assessmentsLegacy === COUNT_LIMIT;
-  }
-  return json({
-    stats: {
-      resources_total: resourcesTotal,
-      resources_capped: resourcesCapped,
-      universities_total: universitiesTotal,
-      favorites_count: favoritesCount,
-      favorites_capped: favoritesCapped,
-      assessments_count: assessmentsCount,
-      assessments_capped: assessmentsCapped,
-    },
-  });
+  const [publicPart, personalPart] = await Promise.all([
+    publicStats(db),
+    userId
+      ? personalStats(db, userId)
+      : { favorites_count: null, favorites_capped: false, assessments_count: null, assessments_capped: false },
+  ]);
+  return json({ stats: { ...publicPart, ...personalPart } });
 }
 
 // 会话凭据只在服务端校验；用户资料单独读取（会话表里只有摘要、用户 ID 与时间）。

@@ -395,6 +395,10 @@ test('院校对比：同一组合下各校取最新一年最低分与计划数�
   assert.equal(a.plans.majors, 2);
   assert.equal(a.plans.rows, 3);
   assert.deepEqual(a.plans.sources, ['省教育考试院']);
+  // 对照来源取所选组合下最低分行的来源，不是院校基础信息的建库来源（'教育部名单'）。
+  assert.equal(a.data_source, '省教育考试院');
+  assert.notEqual(a.data_source, a.source);
+  assert.equal(b.data_source, '省教育考试院');
   // 乙大学：最新一年 2026，最低分 620，无法解析的 'abc' 跳过并计数；计划年份独立于分数年份。
   assert.equal(b.score.min_score, 620);
   assert.equal(b.score.year, 2026);
@@ -414,11 +418,13 @@ test('院校对比：缺失的分数或计划返回 null，未知代码标 found
   assert.equal(c.found, true);
   assert.equal(c.score, null);
   assert.equal(c.plans, null);
+  assert.equal(c.data_source, null);
   assert.equal(missing.code, 'u999');
   assert.equal(missing.found, false);
   assert.equal(missing.name, null);
   assert.equal(missing.score, null);
   assert.equal(missing.plans, null);
+  assert.equal(missing.data_source, null);
 });
 
 test('院校对比：院校数量与省份科类批次校验不通过返回 400', async () => {
@@ -455,6 +461,28 @@ test('院校对比：最新一年分数全部无法解析时最低分为空并�
   assert.equal(a.score.year, 2026);
   assert.equal(a.score.rows, 2);
   assert.equal(a.score.invalid_rows, 2);
+  // 分数全部无法解析、又没有计划行：对照来源为 null，不回退到建库来源。
+  assert.equal(a.data_source, null);
+});
+
+test('院校对比：分数缺失时对照来源退到同省同批次计划行来源', async () => {
+  const { handle, db } = fixture();
+  await seedCompare(db);
+  await db.from('universities').insertIfAbsent([
+    { code: 'u400', name: '丁大学', province: '河北', city: '石家庄市', type: '综合', level: '本科', tags: null, website: null, source: '教育部名单' },
+  ], { onConflict: 'code' });
+  await db.from('enrollment_plans').insertIfAbsent([
+    { id: 'cmp-p9', school_name: '丁大学', province: '河北', year: 2025, major_name: '数学', batch: '本科批', plan_count: 7, source: '计划来源甲' },
+    { id: 'cmp-p10', school_name: '丁大学', province: '河北', year: 2025, major_name: '物理', batch: '本科批', plan_count: 3, source: '计划来源乙' },
+  ], { onConflict: 'id' });
+  const result = await call(handle, ctx(comparePath({ codes: 'u100,u400' })));
+  assert.equal(result.status, 200);
+  const [a, d] = result.body.items;
+  assert.equal(a.data_source, '省教育考试院');
+  assert.equal(d.score, null);
+  assert.equal(d.plans.total_count, 10);
+  assert.equal(d.plans.year, 2025);
+  assert.equal(d.data_source, '计划来源甲；计划来源乙');
 });
 
 // ---- 模块9：任务同步到账号（普通任务） ----
@@ -2106,6 +2134,21 @@ test('首页统计：计数触顶如实报告 capped，不把截断值当真实�
   assert.equal(s.resources_capped, true);
   assert.equal(s.favorites_count, 500);
   assert.equal(s.favorites_capped, true);
+});
+
+test('首页统计：资料总数与资料库列表同一口径（只计未删除行），删除后两边一致', async () => {
+  const { db, handle } = fixture();
+  await db.from('resources').insertIfAbsent([
+    { id: 'r1', title: '资料一', deleted_at: null },
+    { id: 'r2', title: '资料二', deleted_at: null },
+    { id: 'r3', title: '资料三', deleted_at: '2026-11-20T00:00:00.000Z' },
+  ], { onConflict: 'id' });
+  const stats = (await call(handle, ctx('/api/stats'))).body.stats;
+  const list = await call(handle, ctx('/api/resources'));
+  assert.equal(stats.resources_total, 2);
+  assert.equal(stats.resources_capped, false);
+  assert.equal(list.body.total, 2);
+  assert.equal(stats.resources_total, list.body.total);
 });
 
 test('模块4文件：上传需登录，类型/大小/路径校验，存储路径由会话派生', async () => {

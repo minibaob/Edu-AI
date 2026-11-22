@@ -506,10 +506,10 @@ function CompareTable({ result, province }: { result: CompareResponse; province:
                 ))}
               </tr>
               <tr className="align-top">
-                <td className="px-4 py-3 text-muted-foreground">基础信息来源</td>
+                <td className="px-4 py-3 text-muted-foreground">本次对照数据来源</td>
                 {items.map((item) => (
                   <td key={item.code} className="px-4 py-3 text-xs text-muted-foreground break-words">
-                    {nd(item.source)}
+                    {nd(item.data_source)}
                   </td>
                 ))}
               </tr>

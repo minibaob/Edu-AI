@@ -27,6 +27,9 @@ export type CompareItem = {
   tags: string | null;
   website: string | null;
   source: string | null;
+  // 本次对照的数据来源：所选省份+科类+批次下最低分行的来源（分数缺失时退到计划行来源）。
+  // universities.source 是建库静态口径，与本次对照无关，不再用于展示。
+  data_source: string | null;
   score: CompareScore | null;
   plans: ComparePlans | null;
 };

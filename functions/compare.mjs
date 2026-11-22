@@ -42,7 +42,7 @@ async function latestYear(db, table, filters) {
 async function compareOne(db, code, province, category, batch) {
   const notFound = {
     code, name: null, found: false, province: null, city: null, type: null, level: null,
-    tags: null, website: null, source: null, score: null, plans: null,
+    tags: null, website: null, source: null, data_source: null, score: null, plans: null,
   };
   const found = rows(await db.from('universities').select(UNIVERSITY_COLUMNS).eq('code', code).limit(1));
   if (found.length !== 1) return notFound;
@@ -103,7 +103,16 @@ async function compareOne(db, code, province, category, batch) {
     };
   }
 
-  return { ...base, score, plans };
+  // 本次对照的数据来源：取所选组合（省份+科类+批次）下最低分行的来源；
+  // 分数缺失时退到同省同批次计划行的来源；两者都没有为 null。
+  // 注意：universities.source 是建库时该行来自哪个省 CSV 的静态口径
+  // （例如只在河南 CSV 里有的学校会写河南 2025 年的来源），与本次对照的
+  // 省份/科类/批次无关，不能当作本次对照的来源展示。
+  const dataSource = score?.source
+    ?? (plans && plans.sources.length > 0 ? plans.sources.join('；') : null)
+    ?? null;
+
+  return { ...base, data_source: dataSource, score, plans };
 }
 
 export async function compareUniversities(db, request) {
