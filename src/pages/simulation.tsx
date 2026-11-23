@@ -4,12 +4,13 @@ import { ClipboardList, Loader2, TriangleAlert } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, errorMessage } from "@/src/lib/api";
 import HebeiScoreReference from "@/src/components/hebei-score-reference";
 import {
-  getSimulation, getSimulationOptions, SIMULATION_PAGE_SIZE, SIMULATION_RULES,
+  DISCIPLINE_OPTIONS, disciplineLabel, getSimulation, getSimulationOptions, SIMULATION_PAGE_SIZE,
 } from "@/src/lib/simulation";
 import type { SimulationInput, SimulationItem, SimulationOptions, SimulationResponse } from "@/src/lib/simulation";
 
@@ -78,9 +79,12 @@ export default function SimulationPage() {
   const [result, setResult] = useState<SimulationResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [queryError, setQueryError] = useState("");
+  const [filterDisciplines, setFilterDisciplines] = useState<string[]>([]);
+  const [filterProvinces, setFilterProvinces] = useState<string[]>([]);
   const optionsSequence = useRef(0);
   const querySequence = useRef(0);
   const matching = useRef(false);
+  const resultsRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const sequence = ++optionsSequence.current;
@@ -102,6 +106,13 @@ export default function SimulationPage() {
     querySequence.current += 1;
     matching.current = false;
   }, []);
+
+  // 新提交的结果回来后滚到结果区（结果在表单下方，首屏看不到）；翻页不滚动。
+  useEffect(() => {
+    if (result && result.offset === 0) {
+      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [result]);
 
   const categories = options?.available ? options.options : [];
   const batches = categories.find((item) => item.category === form.category)?.batches ?? [];
@@ -143,6 +154,12 @@ export default function SimulationPage() {
     setOptionsRetry((value) => value + 1);
   }
 
+  // 意向筛选与改其他条件一样：改动即清空上次结果，需重新提交才生效。
+  function toggleFilter(list: string[], value: string, setList: (next: string[]) => void) {
+    clearResults();
+    setList(list.includes(value) ? list.filter((item) => item !== value) : [...list, value]);
+  }
+
   async function runSimulation(submission: Submission) {
     if (matching.current) return;
     matching.current = true;
@@ -157,7 +174,7 @@ export default function SimulationPage() {
     } catch (err) {
       if (sequence !== querySequence.current) return;
       setQueryError(err instanceof ApiError && err.status === 400
-        ? "条件无效：请重新选择已收录的科类和批次；分数须为 0–750 的整数，位次须为正安全整数或留空。"
+        ? "条件无效：请重新选择已收录的科类和批次；分数须为 0–750 的整数，位次须为正安全整数或留空；意向方向与省份须从列表中选择。"
         : errorMessage(err));
     } finally {
       if (sequence === querySequence.current) {
@@ -187,7 +204,7 @@ export default function SimulationPage() {
     if (Object.keys(errors).length > 0) return;
     // 新建快照；后续分页与重试只使用此次明确提交的条件。
     void runSimulation({
-      input: { province: form.province, category: form.category, batch: form.batch, score, rank },
+      input: { province: form.province, category: form.category, batch: form.batch, score, rank, disciplines: filterDisciplines, provinces: filterProvinces },
       offset: 0,
     });
   }
@@ -200,18 +217,6 @@ export default function SimulationPage() {
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">基于已收录真实数据进行规则匹配，帮助你对照学校分数线。</p>
       </header>
-
-      <Card className="gap-3 border-primary/20">
-        <CardHeader><CardTitle><h2 className="text-base">规则匹配说明</h2></CardTitle></CardHeader>
-        <CardContent className="space-y-2 text-sm leading-relaxed">
-          <p className="font-medium">{SIMULATION_RULES.delta}</p>
-          <p>{SIMULATION_RULES.chong}</p>
-          <p>{SIMULATION_RULES.wen}</p>
-          <p>{SIMULATION_RULES.bao}</p>
-          <p className="text-muted-foreground">d &gt; 10 的学校不匹配。位次仅作对照，不参与分档。</p>
-          <p className="text-muted-foreground">每档每页最多 {SIMULATION_PAGE_SIZE} 所，冲 / 稳 / 保三档同步翻页。</p>
-        </CardContent>
-      </Card>
 
       <Alert className="border-primary/40 bg-accent/50">
         <TriangleAlert aria-hidden />
@@ -230,6 +235,41 @@ export default function SimulationPage() {
         </CardHeader>
         <CardContent>
           <form noValidate autoComplete="off" onSubmit={submit} className="flex flex-col gap-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <fieldset className="flex min-w-0 flex-col gap-2">
+                <legend className="text-sm font-medium">意向方向（选填）</legend>
+                <div className="flex flex-wrap gap-x-4 gap-y-2">
+                  {DISCIPLINE_OPTIONS.map((option) => (
+                    <label key={option.key} className="flex cursor-pointer items-center gap-1.5 text-sm">
+                      <Checkbox checked={filterDisciplines.includes(option.key)}
+                        onCheckedChange={() => toggleFilter(filterDisciplines, option.key, setFilterDisciplines)} />
+                      {option.label}
+                    </label>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">不选就是不限；选了只显示能确认开设该方向专业的学校，没有招生计划记录的学校会筛掉。</p>
+              </fieldset>
+              <fieldset className="flex min-w-0 flex-col gap-2">
+                <legend className="text-sm font-medium">想去的省份（选填）</legend>
+                {optionsLoading ? (
+                  <p className="text-xs text-muted-foreground">省份选项加载中…</p>
+                ) : (options?.provinces ?? []).length === 0 ? (
+                  <p className="text-xs text-muted-foreground">暂无省份选项。</p>
+                ) : (
+                  <div className="flex flex-wrap gap-x-4 gap-y-2">
+                    {(options?.provinces ?? []).map((name) => (
+                      <label key={name} className="flex cursor-pointer items-center gap-1.5 text-sm">
+                        <Checkbox checked={filterProvinces.includes(name)}
+                          onCheckedChange={() => toggleFilter(filterProvinces, name, setFilterProvinces)} />
+                        {name}
+                      </label>
+                    ))}
+                  </div>
+                )}
+                <p className="text-xs text-muted-foreground">不选就是全国不限；按学校所在省份筛选。</p>
+              </fieldset>
+            </div>
+
             <div className="grid gap-4 sm:grid-cols-3">
               <div className="flex min-w-0 flex-col gap-2">
                 <Label htmlFor="simulation-province">高考省份</Label>
@@ -315,12 +355,14 @@ export default function SimulationPage() {
 
       {!submitted && <p className="py-4 text-center text-sm text-muted-foreground">请填写条件并提交，查看冲 / 稳 / 保三档规则匹配结果。</p>}
       {submitted && (
-        <section aria-labelledby="simulation-results-title" aria-busy={loading} className="flex min-w-0 flex-col gap-4">
+        <section ref={resultsRef} aria-labelledby="simulation-results-title" aria-busy={loading} className="flex min-w-0 flex-col gap-4">
           <div className="space-y-2">
             <h2 id="simulation-results-title" className="text-lg font-semibold">模拟填报 · 规则匹配结果</h2>
             <p className="break-words text-sm">
               本次提交：{submitted.input.province} · {submitted.input.category} · {submitted.input.batch} · 我的分数 {submitted.input.score} 分
               {submitted.input.rank !== null && <> · 我的位次 {submitted.input.rank}</>}
+              {` · 意向方向：${submitted.input.disciplines.length > 0 ? submitted.input.disciplines.map(disciplineLabel).join("、") : "不限"}`}
+              {` · 想去的省份：${submitted.input.provinces.length > 0 ? submitted.input.provinces.join("、") : "不限"}`}
             </p>
             <p className="text-sm text-muted-foreground">每档每页最多 {SIMULATION_PAGE_SIZE} 所，三档同步翻页；总页数按三档匹配总数的最大值计算。</p>
           </div>

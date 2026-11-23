@@ -80,7 +80,7 @@ test('河北一分一段参考：三年来源、日期和官方普通类PDF地�
 
 const simulationPath = (extra = {}) => `/api/simulation?${new URLSearchParams({ province: '河北', category: '物理类', batch: '本科批', score: '600', ...extra })}`;
 async function seedSimulation(db, records) {
-  const schools = [...new Map(records.map((row) => [row.university_code, { code: row.university_code, name: `测试院校${row.university_code}` }])).values()];
+  const schools = [...new Map(records.map((row) => [row.university_code, { code: row.university_code, name: `测试院校${row.university_code}`, province: row.school_province ?? '河北' }])).values()];
   assert.equal((await db.from('universities').insertIfAbsent(schools, { onConflict: 'code' })).error, null);
   const scores = records.map((row, i) => ({
     id: `simulation-${String(i).padStart(5, '0')}`, province: '河北', category: '物理类', batch: '本科批', year: 2026,
@@ -333,6 +333,67 @@ test('模拟填报：数据库中途失败不可返回部分结果冒充总数',
   assert.equal(result.status, 503);
   assert.equal(result.body.error, 'database_unavailable');
   assert.equal('groups' in result.body, false);
+});
+
+async function seedSimulationMajorsAndPlans(db) {
+  await db.from('majors').insertIfAbsent([
+    { code: '080901', name: '计算机科学与技术', category: '工学', years: 4, degree: '学士', source: '测试来源', note: null, created_at: new Date().toISOString() },
+    { code: '050101', name: '汉语言文学', category: '文学', years: 4, degree: '学士', source: '测试来源', note: null, created_at: new Date().toISOString() },
+    { code: '100201', name: '临床医学', category: '医学', years: 5, degree: '学士', source: '测试来源', note: null, created_at: new Date().toISOString() },
+  ], { onConflict: 'code' });
+  await db.from('enrollment_plans').insertIfAbsent([
+    { id: 'simulation-plan-000', university_code: 'u0', school_name: '测试院校u0', province: '河北', year: 2026, major_code: '080901', major_name: '计算机科学与技术', batch: '本科批', plan_count: 10, source: '测试来源' },
+    { id: 'simulation-plan-001', university_code: 'u1', school_name: '测试院校u1', province: '河北', year: 2026, major_code: '050101', major_name: '汉语言文学', batch: '本科批', plan_count: 10, source: '测试来源' },
+  ], { onConflict: 'id' });
+}
+
+test('模拟填报：意向方向按招生计划专业门类筛选，无计划学校排除', async () => {
+  const { db, handle } = fixture();
+  await seedSimulation(db, [
+    { university_code: 'u0', min_score: '600' },
+    { university_code: 'u1', min_score: '600' },
+    { university_code: 'u2', min_score: '600' },
+  ]);
+  await seedSimulationMajorsAndPlans(db);
+  const codes = (body) => body.groups.wen.items.map((r) => r.university_code);
+  const all = (await call(handle, ctx(simulationPath()))).body;
+  assert.deepEqual(codes(all), ['u0', 'u1', 'u2']);
+  assert.deepEqual(all.disciplines, []);
+  const gongke = (await call(handle, ctx(simulationPath({ disciplines: 'gongke' })))).body;
+  assert.deepEqual(codes(gongke), ['u0']);
+  assert.deepEqual(gongke.disciplines, ['gongke']);
+  assert.equal(gongke.groups.wen.total, 1);
+  const wenke = (await call(handle, ctx(simulationPath({ disciplines: 'wenke' })))).body;
+  assert.deepEqual(codes(wenke), ['u1']);
+  const yike = (await call(handle, ctx(simulationPath({ disciplines: 'yike' })))).body;
+  assert.equal(yike.groups.wen.total, 0);
+  const both = (await call(handle, ctx(simulationPath({ disciplines: 'gongke,wenke' })))).body;
+  assert.deepEqual(codes(both), ['u0', 'u1']);
+  const empty = (await call(handle, ctx(simulationPath({ disciplines: '' })))).body;
+  assert.deepEqual(codes(empty), ['u0', 'u1', 'u2']);
+  assert.equal((await call(handle, ctx(simulationPath({ disciplines: 'notakey' })))).status, 400);
+  assert.equal((await call(handle, ctx(simulationPath({ disciplines: 'gongke,notakey' })))).status, 400);
+});
+
+test('模拟填报：想去省份按学校所在省筛选，选项返回省份列表', async () => {
+  const { db, handle } = fixture();
+  await seedSimulation(db, [
+    { university_code: 'u0', min_score: '600', school_province: '河北' },
+    { university_code: 'u1', min_score: '600', school_province: '河南' },
+    { university_code: 'u2', min_score: '600', school_province: '北京' },
+  ]);
+  const codes = (body) => body.groups.wen.items.map((r) => r.university_code);
+  const all = (await call(handle, ctx(simulationPath()))).body;
+  assert.deepEqual(codes(all), ['u0', 'u1', 'u2']);
+  const henan = (await call(handle, ctx(simulationPath({ provinces: '河南' })))).body;
+  assert.deepEqual(codes(henan), ['u1']);
+  assert.deepEqual(henan.provinces, ['河南']);
+  const two = (await call(handle, ctx(simulationPath({ provinces: '河北,北京' })))).body;
+  assert.deepEqual(codes(two), ['u0', 'u2']);
+  const empty = (await call(handle, ctx(simulationPath({ provinces: '' })))).body;
+  assert.deepEqual(codes(empty), ['u0', 'u1', 'u2']);
+  const options = (await call(handle, ctx('/api/simulation/options?province=河北'))).body;
+  assert.deepEqual(options.provinces, ['北京', '河北', '河南']);
 });
 
 // --- 院校对比 ---

@@ -2,6 +2,22 @@ import { api } from "@/src/lib/api";
 
 export const SIMULATION_PAGE_SIZE = 20;
 
+// 意向方向选项：键固定不变，后端按 DISCIPLINE_CATEGORIES（functions/simulation.mjs）
+// 把键映射到专业目录学科门类；不选就是不限。
+export const DISCIPLINE_OPTIONS = [
+  { key: "gongke", label: "工科" },
+  { key: "like", label: "理科" },
+  { key: "yike", label: "医科" },
+  { key: "shangke", label: "商科" },
+  { key: "wenke", label: "文科" },
+] as const;
+
+export type DisciplineKey = (typeof DISCIPLINE_OPTIONS)[number]["key"];
+
+export function disciplineLabel(key: string): string {
+  return DISCIPLINE_OPTIONS.find((option) => option.key === key)?.label ?? key;
+}
+
 // 固定展示规则，不根据输入或接口返回改写分档含义。
 export const SIMULATION_RULES = {
   delta: "设 d = 该校最新一年 min_score − 我的 score；",
@@ -16,6 +32,7 @@ export type SimulationOptions = {
   message: string | null;
   options: { category: string; batches: { batch: string; year: number }[] }[];
   rules: { delta: string; chong: string; wen: string; bao: string };
+  provinces: string[];
 };
 
 export type SimulationInput = {
@@ -24,6 +41,8 @@ export type SimulationInput = {
   batch: string;
   score: number;
   rank: number | null;
+  disciplines: string[];
+  provinces: string[];
 };
 
 export type SimulationItem = {
@@ -66,5 +85,7 @@ export function getSimulation(input: SimulationInput, offset = 0): Promise<Simul
     offset: String(offset),
   });
   if (input.rank !== null) params.set("rank", String(input.rank));
+  if (input.disciplines.length > 0) params.set("disciplines", input.disciplines.join(","));
+  if (input.provinces.length > 0) params.set("provinces", input.provinces.join(","));
   return api<SimulationResponse>(`/api/simulation?${params}`);
 }

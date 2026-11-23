@@ -2,6 +2,18 @@ import { AppError, json, rows } from './http.mjs';
 
 const PROVINCES = ['河北', '河南'];
 const CATEGORIES = ['物理类', '历史类'];
+// 意向方向（前端复选框键）→ 专业目录学科门类。目录值取自 functions/validate.mjs 的
+// MAJOR_CATEGORIES（14 个官方学科门类）与 db/import/模板填写说明.md，不自造分类。
+// 商科、文科是前端展示用的合类，各自对应多个门类。
+export const DISCIPLINE_CATEGORIES = Object.freeze({
+  gongke: ['工学'],
+  like: ['理学'],
+  yike: ['医学'],
+  shangke: ['管理学', '经济学'],
+  wenke: ['文学', '法学', '教育学', '历史学', '哲学'],
+});
+const DISCIPLINE_KEYS = Object.keys(DISCIPLINE_CATEGORIES);
+const MAX_PROVINCES = 34;
 const READ_PAGE_SIZE = 500;
 const RESULT_PAGE_SIZE = 20;
 const SCORE_COLUMNS = 'id,university_code,school_name,min_score,min_rank,year,source';
@@ -27,6 +39,17 @@ function integer(value, min, max, code) {
   return number;
 }
 
+// 逗号分隔的可选多选参数：去空、去重、保序；未传或全空返回 []（不过滤）。
+function parseList(value) {
+  if (value === null || value === undefined) return [];
+  const seen = new Set();
+  for (const part of String(value).split(',')) {
+    const item = part.trim();
+    if (item !== '' && !seen.has(item)) seen.add(item);
+  }
+  return [...seen];
+}
+
 async function readPages(makeQuery, key) {
   const result = [];
   let lastKey;
@@ -44,8 +67,12 @@ async function readPages(makeQuery, key) {
 export async function simulationOptions(db, request) {
   const params = new URL(request.url).searchParams;
   const province = parameter(params, 'province');
+  // 想去的省份选项：已登记学校的所在省（去重、中文排序），与考生省份无关。
+  const schools = await readPages(() => db.from('universities').select('code,province'), 'code');
+  const provinces = [...new Set(schools.map((row) => row.province).filter((value) => typeof value === 'string' && value.trim() !== ''))]
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
   if (!PROVINCES.includes(province)) {
-    return json({ province, available: false, message: '暂无数据，采集中', options: [], rules: SIMULATION_RULES });
+    return json({ province, available: false, message: '暂无数据，采集中', options: [], rules: SIMULATION_RULES, provinces });
   }
   const records = await readPages(() => db.from('admission_scores')
     .select('id,category,batch,year').eq('province', province), 'id');
@@ -57,7 +84,7 @@ export async function simulationOptions(db, request) {
     return years.size === 0 ? [] : [{ category, batches: [...years].sort(([a], [b]) => a.localeCompare(b, 'zh-CN'))
       .map(([batch, year]) => ({ batch, year })) }];
   });
-  return json({ province, available: options.length > 0, message: options.length ? null : '暂无数据，采集中', options, rules: SIMULATION_RULES });
+  return json({ province, available: options.length > 0, message: options.length ? null : '暂无数据，采集中', options, rules: SIMULATION_RULES, provinces });
 }
 
 export async function simulateAdmissions(db, request) {
@@ -69,12 +96,18 @@ export async function simulateAdmissions(db, request) {
   const rankText = parameter(params, 'rank', 20);
   const rank = rankText === null || rankText === '' ? null : integer(rankText, 1, Number.MAX_SAFE_INTEGER, 'invalid_simulation_rank');
   const offset = integer(parameter(params, 'offset', 20) ?? '0', 0, 1000000, 'invalid_filter');
+  const disciplines = parseList(parameter(params, 'disciplines', 200));
+  const provinces = parseList(parameter(params, 'provinces', 500));
+  if (disciplines.some((key) => !DISCIPLINE_KEYS.includes(key))) throw new AppError('invalid_input', 400);
+  if (provinces.length > MAX_PROVINCES) throw new AppError('invalid_input', 400);
+  const provinceFilter = new Set(provinces);
+  const disciplineCategories = [...new Set(disciplines.flatMap((key) => DISCIPLINE_CATEGORIES[key]))];
   const supported = PROVINCES.includes(province);
   if (!province || (supported && (!CATEGORIES.includes(category) || !batch?.trim()))) throw new AppError('invalid_input', 400);
 
-  const universities = await readPages(() => db.from('universities').select('code,name'), 'code');
+  const universities = await readPages(() => db.from('universities').select('code,name,province'), 'code');
   const response = {
-    province, category, batch, score, rank, year: null, available: false, message: '暂无数据，采集中',
+    province, category, batch, score, rank, disciplines, provinces, year: null, available: false, message: '暂无数据，采集中',
     offset, limit: RESULT_PAGE_SIZE, skipped_universities: universities.length,
     invalid_score_rows: 0, outside_range_count: 0,
     groups: { chong: { total: 0, items: [] }, wen: { total: 0, items: [] }, bao: { total: 0, items: [] } },
@@ -87,12 +120,33 @@ export async function simulateAdmissions(db, request) {
   if (!latest.length) return json(response);
   const year = latest[0].year;
   const records = await readPages(() => scoped(SCORE_COLUMNS).eq('year', year), 'id');
+
+  // 意向方向只在选了才查：专业目录 + 本省招生计划。计划表按校名关联院校
+  // （计划表用省报考代码，与录取表国标代码不同源，见 db/schema.sql 注释），
+  // 因此用 school_name 匹配；没有招生计划行的学校在方向筛选下排除。
+  let disciplineSchools = null;
+  if (disciplineCategories.length > 0) {
+    const majors = await readPages(() => db.from('majors').select('code,category'), 'code');
+    const categoryByMajor = new Map(majors.map((major) => [major.code, major.category]));
+    const plans = await readPages(() => db.from('enrollment_plans')
+      .select('id,school_name,major_code').eq('province', province), 'id');
+    disciplineSchools = new Set();
+    for (const plan of plans) {
+      if (!plan.major_code || !disciplineCategories.includes(categoryByMajor.get(plan.major_code))) continue;
+      if (typeof plan.school_name === 'string' && plan.school_name !== '') disciplineSchools.add(plan.school_name);
+    }
+  }
+
   const byCode = new Map(universities.map((university) => [university.code, university]));
   const present = new Set();
   const groups = { chong: [], wen: [], bao: [] };
   for (const row of records) {
     const university = byCode.get(row.university_code);
     if (university) present.add(university.code);
+    // 意向筛选只影响分档与计数口径；skipped_universities 仍按原口径统计
+    // （所选省/科类/批次最新年无记录的学校数），与筛选无关。
+    if (provinceFilter.size > 0 && !provinceFilter.has(university?.province)) continue;
+    if (disciplineSchools && !disciplineSchools.has(row.school_name || university?.name)) continue;
     const raw = String(row.min_score ?? '').trim();
     const minScore = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(raw) ? Number(raw) : NaN;
     if (!Number.isFinite(minScore)) { response.invalid_score_rows += 1; continue; }
