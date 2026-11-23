@@ -16,8 +16,9 @@ const CHUNK_SIZE = 500;
 
 const TABLES: { key: ImportTable; label: string; file: string }[] = [
   { key: "universities", label: "① 院校清单", file: "universities.csv" },
-  { key: "admission_scores", label: "② 历年录取", file: "admission_scores.csv" },
-  { key: "enrollment_plans", label: "③ 招生计划", file: "enrollment_plans.csv" },
+  { key: "majors", label: "② 专业目录（意向方向需要）", file: "majors.csv" },
+  { key: "admission_scores", label: "③ 历年录取", file: "admission_scores.csv" },
+  { key: "enrollment_plans", label: "④ 招生计划", file: "enrollment_plans.csv" },
 ];
 
 type Status = "idle" | "uploading" | "done" | "error";
@@ -39,7 +40,7 @@ function distinctValues(records: ImportRecord[], field: string): (string | numbe
 export default function AdminImportPage() {
   const { user, loading } = useAuth();
   const [states, setStates] = useState<Record<ImportTable, TableState>>({
-    universities: { ...initial }, admission_scores: { ...initial }, enrollment_plans: { ...initial },
+    universities: { ...initial }, majors: { ...initial }, admission_scores: { ...initial }, enrollment_plans: { ...initial },
   });
   const parsed = useRef<Partial<Record<ImportTable, { runId: string; records: ImportRecord[] }>>>({});
 
@@ -96,13 +97,14 @@ export default function AdminImportPage() {
         categories: distinctValues(records, "category"),
         batches: distinctValues(records, "batch"),
       });
-    } else {
+    } else if (table === "enrollment_plans") {
       await postMeta("plan_facets", {
         provinces: distinctValues(records, "province"),
         years: distinctValues(records, "year"),
         batches: distinctValues(records, "batch"),
       });
     }
+    // majors 没有筛选面元数据：意向方向的派生缓存在服务端按行数版本自动重建。
   }
 
   if (loading) return <p className="py-16 text-center text-sm text-muted-foreground">正在检查登录状态…</p>;

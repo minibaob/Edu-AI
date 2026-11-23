@@ -1,4 +1,5 @@
 import { AppError, json, rows } from './http.mjs';
+import { getDisciplineSchoolCategories } from './discipline-cache.mjs';
 
 const PROVINCES = ['河北', '河南'];
 const CATEGORIES = ['物理类', '历史类'];
@@ -108,6 +109,7 @@ export async function simulateAdmissions(db, request) {
   const universities = await readPages(() => db.from('universities').select('code,name,province'), 'code');
   const response = {
     province, category, batch, score, rank, disciplines, provinces, year: null, available: false, message: '暂无数据，采集中',
+    disciplines_status: null,
     offset, limit: RESULT_PAGE_SIZE, skipped_universities: universities.length,
     invalid_score_rows: 0, outside_range_count: 0,
     groups: { chong: { total: 0, items: [] }, wen: { total: 0, items: [] }, bao: { total: 0, items: [] } },
@@ -121,20 +123,17 @@ export async function simulateAdmissions(db, request) {
   const year = latest[0].year;
   const records = await readPages(() => scoped(SCORE_COLUMNS).eq('year', year), 'id');
 
-  // 意向方向只在选了才查：专业目录 + 本省招生计划。计划表按校名关联院校
-  // （计划表用省报考代码，与录取表国标代码不同源，见 db/schema.sql 注释），
-  // 因此用 school_name 匹配；没有招生计划行的学校在方向筛选下排除。
+  // 意向方向只在选了才查：走 discipline-cache 的派生缓存，按校名聚合「该校在本省招生计划里
+  // 出现过的学科门类」。计划表按校名关联院校（计划表用省报考代码，与录取表国标代码不同源，
+  // 见 db/schema.sql 注释）；没有招生计划行的学校在方向筛选下排除；专业目录为空时不做整省扫描。
   let disciplineSchools = null;
   if (disciplineCategories.length > 0) {
-    const majors = await readPages(() => db.from('majors').select('code,category'), 'code');
-    const categoryByMajor = new Map(majors.map((major) => [major.code, major.category]));
-    const plans = await readPages(() => db.from('enrollment_plans')
-      .select('id,school_name,major_code').eq('province', province), 'id');
-    disciplineSchools = new Set();
-    for (const plan of plans) {
-      if (!plan.major_code || !disciplineCategories.includes(categoryByMajor.get(plan.major_code))) continue;
-      if (typeof plan.school_name === 'string' && plan.school_name !== '') disciplineSchools.add(plan.school_name);
-    }
+    const derived = await getDisciplineSchoolCategories(db, province);
+    response.disciplines_status = derived.status;
+    const wanted = new Set(disciplineCategories);
+    disciplineSchools = new Set(Object.entries(derived.schools)
+      .filter(([, categories]) => Array.isArray(categories) && categories.some((category) => wanted.has(category)))
+      .map(([name]) => name));
   }
 
   const byCode = new Map(universities.map((university) => [university.code, university]));

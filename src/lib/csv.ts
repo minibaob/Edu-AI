@@ -25,13 +25,17 @@ export function parseCsv(text: string): string[][] {
   return rows;
 }
 
-export type ImportTable = "universities" | "admission_scores" | "enrollment_plans";
+export type ImportTable = "universities" | "majors" | "admission_scores" | "enrollment_plans";
 
 export const CSV_COLUMNS: Record<ImportTable, Record<string, string>> = {
   universities: {
     院校代码: "code", 学校名称: "name", 所在省份: "province", 所在城市: "city",
     办学类型: "type", 办学层次: "level", 标签: "tags", 招生网址: "website",
     数据来源: "source", 备注: "note",
+  },
+  majors: {
+    专业代码: "code", 专业名称: "name", 学科门类: "category", 学制: "years",
+    授予学位: "degree", 数据来源: "source", 备注: "note",
   },
   admission_scores: {
     院校代码: "university_code", 省份: "province", 年份: "year", 科类: "category",
@@ -47,7 +51,7 @@ export const CSV_COLUMNS: Record<ImportTable, Record<string, string>> = {
   },
 };
 
-const INT_COLUMNS = new Set(["year", "min_rank", "admitted_count", "plan_count", "tuition"]);
+const INT_COLUMNS = new Set(["year", "years", "min_rank", "admitted_count", "plan_count", "tuition"]);
 
 export type ImportRecord = Record<string, string | number | null>;
 

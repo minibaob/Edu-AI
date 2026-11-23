@@ -62,6 +62,8 @@ export type SimulationResponse = SimulationInput & {
   year: number | null;
   available: boolean;
   message: string | null;
+  // catalog_missing：官方专业目录（majors）尚未导入，无法确认哪些学校开设所选方向。
+  disciplines_status: "ok" | "catalog_missing" | null;
   offset: number;
   limit: typeof SIMULATION_PAGE_SIZE;
   skipped_universities: number;

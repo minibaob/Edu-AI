@@ -6,6 +6,7 @@
 import { AppError, errorJson, json, readJson, rows } from './http.mjs';
 import { sha256Hex } from './sessions.mjs';
 import { IMPORT_VALIDATORS } from './import-validate.mjs';
+import { invalidateDisciplineCaches } from './discipline-cache.mjs';
 
 const IMPORT_CHUNK_MAX = 500;
 const IMPORT_BODY_LIMIT = 2 * 1024 * 1024;
@@ -175,6 +176,26 @@ export async function importChunk(db, request) {
         filled += 1;
       }
     }
+  } else if (table === 'majors') {
+    // 专业目录：代码为主键。新代码插入；已有代码只补空的授予学位/备注，不覆盖已有非空值。
+    inserted = 0;
+    const now = new Date().toISOString();
+    for (const record of cleaned) {
+      const created = rows(await db.from('majors').insertIfAbsent({ ...record, created_at: now }, { onConflict: 'code' }).select('code'));
+      if (created.length === 1) { inserted += 1; continue; }
+      const existing = rows(await db.from('majors').select('code,degree,note').eq('code', record.code).limit(1));
+      if (existing.length !== 1) throw new AppError('database_unavailable', 503);
+      const patch = {};
+      for (const key of ['degree', 'note']) {
+        const current = existing[0][key];
+        if ((current === null || current === undefined || current === '') && record[key] !== null) patch[key] = record[key];
+      }
+      if (Object.keys(patch).length > 0) {
+        const updated = rows(await db.from('majors').update(patch).eq('code', record.code).select('code'));
+        if (updated.length !== 1) throw new AppError('database_unavailable', 503);
+        filled += 1;
+      }
+    }
   } else {
     const records = [];
     for (let i = 0; i < cleaned.length; i += 1) {
@@ -184,11 +205,14 @@ export async function importChunk(db, request) {
     inserted = await insertRecords(db, table, records, 'id');
   }
   // 计数由服务端按实际插入行数累加：多省增量导入不覆盖他省计数，幂等重跑不增。
-  if (inserted > 0) {
+  // majors 不计入 counts（口径只有三张业务表），专业目录行数由 /api/majors 返回。
+  if (inserted > 0 && table !== 'majors') {
     const counts = (await readMeta(db, 'counts')) ?? { universities: 0, admission_scores: 0, enrollment_plans: 0 };
     counts[table] = (counts[table] ?? 0) + inserted;
     if (!(await writeMeta(db, 'counts', counts))) return errorJson('meta_unconfirmed', 503);
   }
+  // 专业目录或招生计划一变：意向方向派生缓存立即失效，下次查询按新行数重建。
+  if (inserted > 0 && (table === 'majors' || table === 'enrollment_plans')) await invalidateDisciplineCaches(db);
   return json({ ok: true, table, chunk_index: chunkIndex, received: cleaned.length, inserted, filled });
 }
 
