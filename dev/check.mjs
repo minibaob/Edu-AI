@@ -295,7 +295,7 @@ test('模拟填报：数据库分页被截短时继续读取，仅读两表且�
   assert.deepEqual([...touched].sort(), ['admission_scores', 'universities']);
 });
 
-test('模拟填报：选项扫描跨页，不因500行上限漏掉真实科类批次', async () => {
+test('模拟填报：选项扫描跨页，不因分页上限漏掉真实科类批次', async () => {
   const { db, handle } = fixture();
   await seedSimulation(db, [
     ...Array.from({ length: 501 }, (_, i) => ({ university_code: `s${i}`, min_score: '600' })),
@@ -373,6 +373,50 @@ test('模拟填报：意向方向按招生计划专业门类筛选，无计划�
   assert.deepEqual(codes(empty), ['u0', 'u1', 'u2']);
   assert.equal((await call(handle, ctx(simulationPath({ disciplines: 'notakey' })))).status, 400);
   assert.equal((await call(handle, ctx(simulationPath({ disciplines: 'gongke,notakey' })))).status, 400);
+});
+
+test('模拟填报：意向方向在专业目录为空时不读招生计划表，结果与读完再过滤一致', async () => {
+  const { db } = fixture();
+  await seedSimulation(db, [
+    { university_code: 'u0', min_score: '600' },
+    { university_code: 'u1', min_score: '600' },
+    { university_code: 'u2', min_score: '600' },
+  ]);
+  // 招生计划里明明有工科专业，但专业目录是空的：没有任何代码能命中门类，
+  // 方向集合注定为空，三档都应为 0——与读完十几万行计划再过滤的结果一致。
+  await db.from('enrollment_plans').insertIfAbsent([
+    { id: 'simulation-plan-000', university_code: 'u0', school_name: '测试院校u0', province: '河北', year: 2026, major_code: '080901', major_name: '计算机科学与技术', batch: '本科批', plan_count: 10, source: '测试来源' },
+    { id: 'simulation-plan-001', university_code: 'u1', school_name: '测试院校u1', province: '河北', year: 2026, major_code: '080901', major_name: '计算机科学与技术', batch: '本科批', plan_count: 10, source: '测试来源' },
+  ], { onConflict: 'id' });
+  const touched = new Set();
+  const counting = { from(table) { touched.add(table); return db.from(table); } };
+  const handle = createApplication({ db: counting, origin: PUBLIC_ORIGIN });
+  const result = await call(handle, ctx(simulationPath({ disciplines: 'gongke' })));
+  assert.equal(result.status, 200);
+  assert.ok(Object.values(result.body.groups).every((g) => g.total === 0));
+  assert.ok(touched.has('majors'), '专业目录要读过才知道它是空的');
+  assert.ok(!touched.has('enrollment_plans'), '专业目录为空时不读招生计划全表');
+});
+
+test('模拟填报：一次无方向匹配的分页往返有上限（1203 行只读 6 次）', async () => {
+  const { db } = fixture();
+  await seedSimulation(db, Array.from({ length: 1203 }, (_, i) => ({
+    university_code: `u${String(i).padStart(4, '0')}`, min_score: ['605', '595', '589'][i % 3],
+  })));
+  let rangeCalls = 0;
+  const counting = { from(table) { return { select(columns) {
+    const query = db.from(table).select(columns);
+    const range = query.range.bind(query);
+    query.range = (from, to) => { rangeCalls += 1; return range(from, to); };
+    return query;
+  } }; } };
+  const handle = createApplication({ db: counting, origin: PUBLIC_ORIGIN });
+  const result = await call(handle, ctx(simulationPath()));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.groups.chong.total, 401);
+  // 1203 行 ÷ 1000 行/页 = 每表 3 次往返（2 页数据 + 1 次空页收尾），两表共 6 次；
+  // 上限 7 留 1 次余量。回到 500 行/页会是 8 次，测得到。
+  assert.ok(rangeCalls <= 7, `一次匹配 ${rangeCalls} 次分页往返，超过上限 7`);
 });
 
 test('模拟填报：想去省份按学校所在省筛选，选项返回省份列表', async () => {

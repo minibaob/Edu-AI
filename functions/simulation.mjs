@@ -14,7 +14,9 @@ export const DISCIPLINE_CATEGORIES = Object.freeze({
 });
 const DISCIPLINE_KEYS = Object.keys(DISCIPLINE_CATEGORIES);
 const MAX_PROVINCES = 34;
-const READ_PAGE_SIZE = 500;
+// 单次分页往返取回的行数：与 functions/universities.mjs 的 limit(1000) 同一上限。
+// readPages 的空页收尾与不前进守卫不变，适配器截短分页时仍能读全（见契约测试）。
+const READ_PAGE_SIZE = 1000;
 const RESULT_PAGE_SIZE = 20;
 const SCORE_COLUMNS = 'id,university_code,school_name,min_score,min_rank,year,source';
 export const SIMULATION_THRESHOLDS = Object.freeze({ chongMax: 10, wenMin: -10 });
@@ -64,18 +66,47 @@ async function readPages(makeQuery, key) {
   }
 }
 
+// 意向方向只在选了才查：专业目录 + 本省招生计划。计划表按校名关联院校
+// （计划表用省报考代码，与录取表国标代码不同源，见 db/schema.sql 注释），
+// 因此用 school_name 匹配；没有招生计划行的学校在方向筛选下排除。
+// 专业目录为空时，没有任何专业代码能命中所选门类，方向集合注定为空，
+// 直接跳过招生计划全表读取——结果与读完再过滤完全一致。
+// （两省专业目录 CSV 目前均为 0 行：线上选了方向必走这条路，之前要先串行
+// 读完本省全部招生计划——河北 27,175 行约 56 次往返、河南 183,494 行约 368 次——
+// 才得到同一个空集。）
+async function loadDisciplineSchools(db, province, majors, disciplineCategories) {
+  const wanted = new Set(disciplineCategories);
+  const categoryByMajor = new Map(majors.map((major) => [major.code, major.category]));
+  const schools = new Set();
+  if (!majors.some((major) => wanted.has(major.category))) return schools;
+  const plans = await readPages(() => db.from('enrollment_plans')
+    .select('id,school_name,major_code').eq('province', province), 'id');
+  for (const plan of plans) {
+    if (!plan.major_code || !wanted.has(categoryByMajor.get(plan.major_code))) continue;
+    if (typeof plan.school_name === 'string' && plan.school_name !== '') schools.add(plan.school_name);
+  }
+  return schools;
+}
+
 export async function simulationOptions(db, request) {
   const params = new URL(request.url).searchParams;
   const province = parameter(params, 'province');
+  const supported = PROVINCES.includes(province);
+  // 两张表互不依赖，并行读（之前是串行：高校全表 7 次往返后再读全省录取行 35 次）。
+  // 不支持省份时不碰录取表，只返回省份列表。
+  const [schools, records] = await Promise.all([
+    readPages(() => db.from('universities').select('code,province'), 'code'),
+    supported
+      ? readPages(() => db.from('admission_scores')
+        .select('id,category,batch,year').eq('province', province), 'id')
+      : [],
+  ]);
   // 想去的省份选项：已登记学校的所在省（去重、中文排序），与考生省份无关。
-  const schools = await readPages(() => db.from('universities').select('code,province'), 'code');
   const provinces = [...new Set(schools.map((row) => row.province).filter((value) => typeof value === 'string' && value.trim() !== ''))]
     .sort((a, b) => a.localeCompare(b, 'zh-CN'));
-  if (!PROVINCES.includes(province)) {
+  if (!supported) {
     return json({ province, available: false, message: '暂无数据，采集中', options: [], rules: SIMULATION_RULES, provinces });
   }
-  const records = await readPages(() => db.from('admission_scores')
-    .select('id,category,batch,year').eq('province', province), 'id');
   const options = CATEGORIES.flatMap((category) => {
     const years = new Map();
     for (const row of records) {
@@ -105,6 +136,8 @@ export async function simulateAdmissions(db, request) {
   const supported = PROVINCES.includes(province);
   if (!province || (supported && (!CATEGORIES.includes(category) || !batch?.trim()))) throw new AppError('invalid_input', 400);
 
+  // 高校全表只读一次：skipped_universities 计数、想去省份筛选、校名兜底都要它。
+  // 先读它：不支持省份时直接返回，不再碰录取表；数据库分页异常时也在这里先暴露为 503。
   const universities = await readPages(() => db.from('universities').select('code,name,province'), 'code');
   const response = {
     province, category, batch, score, rank, disciplines, provinces, year: null, available: false, message: '暂无数据，采集中',
@@ -116,26 +149,22 @@ export async function simulateAdmissions(db, request) {
 
   const scoped = (columns) => db.from('admission_scores').select(columns)
     .eq('province', province).eq('category', category).eq('batch', batch);
-  const latest = rows(await scoped('year').order('year', { ascending: false }).limit(1));
+  // 最新年与专业目录互不依赖，并行读；录取行要等最新年、招生计划要等目录结果，
+  // 第二组也并行。一次匹配的串行往返从“各表页数之和”降到“最长的一组”。
+  const [latest, majors] = await Promise.all([
+    rows(await scoped('year').order('year', { ascending: false }).limit(1)),
+    disciplineCategories.length > 0
+      ? readPages(() => db.from('majors').select('code,category'), 'code')
+      : [],
+  ]);
   if (!latest.length) return json(response);
   const year = latest[0].year;
-  const records = await readPages(() => scoped(SCORE_COLUMNS).eq('year', year), 'id');
-
-  // 意向方向只在选了才查：专业目录 + 本省招生计划。计划表按校名关联院校
-  // （计划表用省报考代码，与录取表国标代码不同源，见 db/schema.sql 注释），
-  // 因此用 school_name 匹配；没有招生计划行的学校在方向筛选下排除。
-  let disciplineSchools = null;
-  if (disciplineCategories.length > 0) {
-    const majors = await readPages(() => db.from('majors').select('code,category'), 'code');
-    const categoryByMajor = new Map(majors.map((major) => [major.code, major.category]));
-    const plans = await readPages(() => db.from('enrollment_plans')
-      .select('id,school_name,major_code').eq('province', province), 'id');
-    disciplineSchools = new Set();
-    for (const plan of plans) {
-      if (!plan.major_code || !disciplineCategories.includes(categoryByMajor.get(plan.major_code))) continue;
-      if (typeof plan.school_name === 'string' && plan.school_name !== '') disciplineSchools.add(plan.school_name);
-    }
-  }
+  const [records, disciplineSchools] = await Promise.all([
+    readPages(() => scoped(SCORE_COLUMNS).eq('year', year), 'id'),
+    disciplineCategories.length > 0
+      ? loadDisciplineSchools(db, province, majors, disciplineCategories)
+      : null,
+  ]);
 
   const byCode = new Map(universities.map((university) => [university.code, university]));
   const present = new Set();
