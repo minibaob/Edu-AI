@@ -1,6 +1,7 @@
 // 模块5 导入行校验：管理员导入路由对每一行做服务端复核（不信任浏览器）。
 // 规则与 db/import/validate.mjs 的离线校验一致；缺失字段返回 null，网站显示「暂无数据」。
 import { AppError } from './http.mjs';
+import { MAJOR_CATEGORIES } from './validate.mjs';
 
 const PILOT_PROVINCES = ['河北', '河南'];
 const SCORE_CATEGORIES = ['物理类', '历史类', '理科', '文科', '综合', '艺术类', '体育类'];
@@ -100,8 +101,28 @@ export function validatePlanRow(raw) {
   };
 }
 
+// 专业目录行：口径与 db/import/validate.mjs 的 majors.csv 一致（代码 4–6 位数字、
+// 学科门类取教育部目录 14 个门类、学制 2–8 年）。数据来源必填，不编造。
+const MAJOR_DEGREES = ['学士', '第二学士', '硕士', '博士'];
+
+export function validateMajorRow(raw) {
+  if (!raw || typeof raw !== 'object') bad();
+  const code = textOrNull(raw.code, 8, true);
+  if (!/^\d{4,6}$/.test(code)) bad();
+  return {
+    code,
+    name: textOrNull(raw.name, 120, true),
+    category: enumOrNull(raw.category, MAJOR_CATEGORIES, true),
+    years: intOrNull(raw.years, 2, 8, true),
+    degree: enumOrNull(raw.degree, MAJOR_DEGREES),
+    source: textOrNull(raw.source, 500, true),
+    note: textOrNull(raw.note, 2000),
+  };
+}
+
 export const IMPORT_VALIDATORS = {
   universities: validateUniversityRow,
   admission_scores: validateScoreRow,
   enrollment_plans: validatePlanRow,
+  majors: validateMajorRow,
 };

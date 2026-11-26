@@ -419,6 +419,90 @@ test('模拟填报：一次无方向匹配的分页往返有上限（1203 行只
   assert.ok(rangeCalls <= 7, `一次匹配 ${rangeCalls} 次分页往返，超过上限 7`);
 });
 
+// 线上真实缺陷回归：意向方向筛选原本每次请求都整省扫招生计划（河南 18.3 万行），
+// 网关 504、函数日志 500。现在必须走派生缓存，且目录缺失时不扫描。
+test('模拟填报：专业目录为空时立即返回 catalog_missing，不整省扫描计划', async () => {
+  const { db, handle } = fixture();
+  await seedSimulation(db, [{ university_code: 'u0', min_score: '600' }]);
+  let planReads = 0;
+  const original = db.from;
+  db.from = (table) => {
+    if (table === 'enrollment_plans') planReads += 1;
+    return original.call(db, table);
+  };
+  const res = await call(handle, ctx(simulationPath({ disciplines: 'gongke' })));
+  assert.equal(res.status, 200);
+  assert.equal(res.body.disciplines_status, 'catalog_missing');
+  assert.equal(res.body.groups.wen.total, 0);
+  assert.equal(planReads, 0);
+  // 不选方向时不受影响，也不该读计划表。
+  const plain = (await call(handle, ctx(simulationPath()))).body;
+  assert.deepEqual(plain.groups.wen.items.map((i) => i.university_code), ['u0']);
+  assert.equal(plain.disciplines_status, null);
+  assert.equal(planReads, 0);
+});
+
+test('模拟填报：方向→院校映射按行数版本缓存，计划变化后自动重建', async () => {
+  const { db, handle } = fixture();
+  await seedSimulation(db, [
+    { university_code: 'u0', min_score: '600' },
+    { university_code: 'u1', min_score: '600' },
+  ]);
+  await seedSimulationMajorsAndPlans(db);
+  let planPageReads = 0;
+  const original = db.from;
+  db.from = (table) => {
+    const wrapper = original.call(db, table);
+    if (table !== 'enrollment_plans') return wrapper;
+    const select = wrapper.select;
+    wrapper.select = (...args) => {
+      const chain = select.apply(wrapper, args);
+      const range = chain.range;
+      chain.range = (...bounds) => { planPageReads += 1; return range.apply(chain, bounds); };
+      return chain;
+    };
+    return wrapper;
+  };
+  const codes = (body) => body.groups.wen.items.map((i) => i.university_code);
+  const first = (await call(handle, ctx(simulationPath({ disciplines: 'gongke' })))).body;
+  assert.deepEqual(codes(first), ['u0']);
+  assert.equal(first.disciplines_status, 'ok');
+  assert.ok(planPageReads >= 1, '首次需要分页读计划表建立映射');
+  planPageReads = 0;
+  const second = (await call(handle, ctx(simulationPath({ disciplines: 'wenke' })))).body;
+  assert.deepEqual(codes(second), ['u1']);
+  assert.equal(planPageReads, 0, '命中缓存后不再分页扫描计划表');
+  // 新计划行（u1 也开工学）：行数变化 → 缓存版本失配 → 重建并给出新结果。
+  await db.from('enrollment_plans').insertIfAbsent([
+    { id: 'simulation-plan-002', university_code: 'u1', school_name: '测试院校u1', province: '河北', year: 2026, major_code: '080901', major_name: '计算机科学与技术', batch: '本科批', plan_count: 5, source: '测试来源' },
+  ], { onConflict: 'id' });
+  const third = (await call(handle, ctx(simulationPath({ disciplines: 'gongke' })))).body;
+  assert.deepEqual(codes(third).sort(), ['u0', 'u1']);
+});
+
+test('模块5：majors 专业目录导入走同一管理员路由，服务端复核且按代码幂等只补空', async () => {
+  const { handle, cookie } = await adminFixture();
+  const row = { code: '080901', name: '计算机科学与技术', category: '工学', years: 4, degree: '学士', source: '教育部《普通高等学校本科专业目录》', note: null };
+  assert.equal((await postImport(handle, cookie, chunk('majors', [{ ...row, category: '宇宙学' }]))).status, 400);
+  assert.equal((await postImport(handle, cookie, chunk('majors', [{ ...row, code: '8090100' }]))).status, 400);
+  assert.equal((await postImport(handle, cookie, chunk('majors', [{ ...row, years: 1 }]))).status, 400);
+  assert.equal((await postImport(handle, cookie, chunk('majors', [{ ...row, source: '' }]))).status, 400);
+  const first = await postImport(handle, cookie, chunk('majors', [{ ...row, degree: null }]));
+  assert.equal(first.status, 200);
+  assert.equal(first.body.inserted, 1);
+  assert.equal(first.body.filled, 0);
+  const again = await postImport(handle, cookie, chunk('majors', [row]));
+  assert.equal(again.status, 200);
+  assert.equal(again.body.inserted, 0);
+  assert.equal(again.body.filled, 1, '只补空的授予学位，不新增行');
+  const listed = await call(handle, ctx('/api/majors?limit=10'));
+  assert.equal(listed.body.total, 1);
+  assert.equal(listed.body.items[0].category, '工学');
+  // counts 口径仍是三张业务表，专业目录行数由 /api/majors 给出。
+  assert.deepEqual((await call(handle, ctx('/api/universities'))).body.counts,
+    { universities: 0, admission_scores: 0, enrollment_plans: 0 });
+});
+
 test('模拟填报：想去省份按学校所在省筛选，选项返回省份列表', async () => {
   const { db, handle } = fixture();
   await seedSimulation(db, [

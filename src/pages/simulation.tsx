@@ -394,6 +394,16 @@ export default function SimulationPage() {
                 </CardContent>
               </Card>
 
+              {result.disciplines_status === "catalog_missing" && (
+                <Alert>
+                  <AlertTitle>专业目录尚未导入，意向方向暂不能筛选</AlertTitle>
+                  <AlertDescription>
+                    网站还没有导入官方《普通高等学校本科专业目录》，无法确认哪些学校开设所选方向，因此本次没有匹配结果（不是这些学校不招生）。
+                    管理员在「数据导入」页导入 majors.csv 后即可使用；不选意向方向则按全部院校匹配。
+                  </AlertDescription>
+                </Alert>
+              )}
+
               {!result.available ? (
                 <Alert role="status"><AlertDescription>{result.message ?? "暂无数据，采集中"}</AlertDescription></Alert>
               ) : (

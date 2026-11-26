@@ -1,4 +1,5 @@
 import { AppError, json, rows } from './http.mjs';
+import { getDisciplineSchoolCategories } from './discipline-cache.mjs';
 
 const PROVINCES = ['河北', '河南'];
 const CATEGORIES = ['物理类', '历史类'];
@@ -66,27 +67,11 @@ async function readPages(makeQuery, key) {
   }
 }
 
-// 意向方向只在选了才查：专业目录 + 本省招生计划。计划表按校名关联院校
-// （计划表用省报考代码，与录取表国标代码不同源，见 db/schema.sql 注释），
-// 因此用 school_name 匹配；没有招生计划行的学校在方向筛选下排除。
-// 专业目录为空时，没有任何专业代码能命中所选门类，方向集合注定为空，
-// 直接跳过招生计划全表读取——结果与读完再过滤完全一致。
-// （两省专业目录 CSV 目前均为 0 行：线上选了方向必走这条路，之前要先串行
-// 读完本省全部招生计划——河北 27,175 行约 56 次往返、河南 183,494 行约 368 次——
-// 才得到同一个空集。）
-async function loadDisciplineSchools(db, province, majors, disciplineCategories) {
-  const wanted = new Set(disciplineCategories);
-  const categoryByMajor = new Map(majors.map((major) => [major.code, major.category]));
-  const schools = new Set();
-  if (!majors.some((major) => wanted.has(major.category))) return schools;
-  const plans = await readPages(() => db.from('enrollment_plans')
-    .select('id,school_name,major_code').eq('province', province), 'id');
-  for (const plan of plans) {
-    if (!plan.major_code || !wanted.has(categoryByMajor.get(plan.major_code))) continue;
-    if (typeof plan.school_name === 'string' && plan.school_name !== '') schools.add(plan.school_name);
-  }
-  return schools;
-}
+// 意向方向只在选了才查，走 functions/discipline-cache.mjs 的派生缓存：
+// 先数专业目录行数，为空直接返回 catalog_missing、不扫招生计划；
+// 有目录时按校名聚合「该校在本省招生计划里出现过的学科门类」，按行数版本
+// 缓存进 data_meta。计划表按校名关联院校（计划表用省报考代码，与录取表
+// 国标代码不同源，见 db/schema.sql 注释）；没有招生计划行的学校在方向筛选下排除。
 
 export async function simulationOptions(db, request) {
   const params = new URL(request.url).searchParams;
@@ -141,6 +126,7 @@ export async function simulateAdmissions(db, request) {
   const universities = await readPages(() => db.from('universities').select('code,name,province'), 'code');
   const response = {
     province, category, batch, score, rank, disciplines, provinces, year: null, available: false, message: '暂无数据，采集中',
+    disciplines_status: null,
     offset, limit: RESULT_PAGE_SIZE, skipped_universities: universities.length,
     invalid_score_rows: 0, outside_range_count: 0,
     groups: { chong: { total: 0, items: [] }, wen: { total: 0, items: [] }, bao: { total: 0, items: [] } },
@@ -149,22 +135,25 @@ export async function simulateAdmissions(db, request) {
 
   const scoped = (columns) => db.from('admission_scores').select(columns)
     .eq('province', province).eq('category', category).eq('batch', batch);
-  // 最新年与专业目录互不依赖，并行读；录取行要等最新年、招生计划要等目录结果，
-  // 第二组也并行。一次匹配的串行往返从“各表页数之和”降到“最长的一组”。
-  const [latest, majors] = await Promise.all([
-    rows(await scoped('year').order('year', { ascending: false }).limit(1)),
-    disciplineCategories.length > 0
-      ? readPages(() => db.from('majors').select('code,category'), 'code')
-      : [],
-  ]);
+  // 最新年单行查询；专业目录由派生缓存内部先数行数、按需再读，不在这里另读。
+  const latest = await rows(await scoped('year').order('year', { ascending: false }).limit(1));
   if (!latest.length) return json(response);
   const year = latest[0].year;
-  const [records, disciplineSchools] = await Promise.all([
+  // 录取行与方向派生互不依赖，并行读；一次匹配的串行往返仍是“最长的一组”。
+  const [records, derived] = await Promise.all([
     readPages(() => scoped(SCORE_COLUMNS).eq('year', year), 'id'),
     disciplineCategories.length > 0
-      ? loadDisciplineSchools(db, province, majors, disciplineCategories)
+      ? getDisciplineSchoolCategories(db, province)
       : null,
   ]);
+  let disciplineSchools = null;
+  if (derived) {
+    response.disciplines_status = derived.status;
+    const wanted = new Set(disciplineCategories);
+    disciplineSchools = new Set(Object.entries(derived.schools)
+      .filter(([, categories]) => Array.isArray(categories) && categories.some((category) => wanted.has(category)))
+      .map(([name]) => name));
+  }
 
   const byCode = new Map(universities.map((university) => [university.code, university]));
   const present = new Set();
